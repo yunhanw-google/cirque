@@ -51,6 +51,15 @@ class HomeLan:
       cmd.append('--gateway="{}"'.format(IPV6_GATEWAY))
       cmd.append('--ipv6')
     ret = host_run(self.logger, cmd)
+    if ret.returncode != 0 and self.__ipv6:
+      subnet_id = abs(hash(self.__name)) & 0xFFFF
+      alt_subnet = f'fd00:c17c:{subnet_id:04x}::/64'
+      alt_gw = f'fd00:c17c:{subnet_id:04x}::1'
+      cmd = [
+          'docker', 'network', 'create', self.__name,
+          f'--subnet="{alt_subnet}"', f'--gateway="{alt_gw}"', '--ipv6',
+      ]
+      ret = host_run(self.logger, cmd)
     if ret.returncode != 0:
       self.logger.error('Failed to create home lan %s', self.__name)
     if self.__ipv6:
@@ -97,15 +106,16 @@ class HomeLan:
     flush_command = "ip6tables -t nat -F"
     ret = host_run(self.logger, flush_command)
     if ret.returncode != 0:
-      self.logger.error("Unable to flush nat rule from ipv6...")
+      self.logger.debug("Unable to flush nat rule from ipv6...")
 
   def __enable_ipv6_external_access(self):
-    ip6tables_command = " ".join(
-      ["ip6tables -t nat -A POSTROUTING -s {}".format(IPV6_SUBNET),
-       "! -o docker0 -j MASQUERADE"])
+    ip6tables_command = " ".join([
+        "ip6tables -t nat -A POSTROUTING -s {}".format(IPV6_SUBNET),
+        "! -o docker0 -j MASQUERADE",
+    ])
     ret = host_run(self.logger, ip6tables_command)
     if ret.returncode != 0:
-      self.logger.error('Fail to setup ipv6 external access in ip6tables')
+      self.logger.debug("Fail to setup ipv6 external access in ip6tables")
 
   def __inspect_network_properties(self):
     ret = host_run(self.logger, ['docker', 'network', 'inspect', self.__name])

@@ -13,25 +13,24 @@
 # limitations under the License.
 
 from cirque.capabilities.basecapability import BaseCapability
-from cirque.connectivity.threadsimpipe import ThreadSimPipe
 from cirque.common.cirquelog import CirqueLog
+from cirque.connectivity.threadsimpipe import ThreadSimPipe
 
 
 class ThreadCapability(BaseCapability):
 
-  def __init__(self,
-               node_id,
-               petition_id,
-               daemons=['wpantund', 'otbr-agent'],
-               rcp=False):
+  def __init__(self, node_id, petition_id, daemons=None, rcp=False):
+    if daemons is None:
+      daemons = ('wpantund', 'otbr-agent')
     self.thread_endpoint = ThreadSimPipe(node_id, petition_id, rcp)
     self.thread_endpoint.open()
     self.logger = CirqueLog.get_cirque_logger(self.__class__.__name__)
-    self.daemons = daemons
-    for daemon in daemons:
+    self.daemons = list(daemons)
+    for daemon in self.daemons:
       if daemon not in {'wpantund', 'otbr-agent'}:
         self.logger.warning(
-            'using unkown thread daemon mode: {}'.format(daemon))
+            'using unkown thread daemon mode: {}'.format(daemon)
+        )
 
   @property
   def name(self):

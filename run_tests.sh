@@ -59,11 +59,11 @@ function virtual_thread_clean() {
 
 function create_virtual_environment() {
   echo "creating python3 virtual environment for tests..."
-  python3 -m venv "${VENV}"
+  python3 -m venv --system-site-packages "${VENV}"
   source "${VENV}"/bin/activate
   pip install --upgrade pip
   pip install --upgrade setuptools
-  pip install wheel
+  pip install wheel coverage
   deactivate
 }
 
@@ -128,10 +128,18 @@ function run_unit_tests() {
   echo "running unit tests.."
   source "${VENV}"/bin/activate
   export PATH="${PATH}":"${OPENTHREAD_DIR}"/output/x86_64-unknown-linux-gnu/bin/
+  python3 -m coverage run --source=cirque/virtual_wifi,cirque/home \
+    -m unittest -v cirque/virtual_wifi/test_virtual_wifi_server.py
+  python3 -m coverage report \
+    --include="*/cirque/virtual_wifi/*,*/cirque/home/virtual_home_topology.py,*/cirque/home/__init__.py" \
+    --omit="*/test_*" --fail-under=100 -m
   python3 cirque/capabilities/test/test_mount_capability.py
   python3 cirque/capabilities/test/test_trafficcontrol_capability.py
   python3 cirque/capabilities/test/test_xvnc_capability.py
-  # python3 cirque/capabilities/test/test_wifi_capability.py
+  python3 cirque/capabilities/test/test_bluetooth_capability.py
+  python3 cirque/capabilities/test/test_wifi_capability.py
+  python3 -m unittest -v examples/test_virtual_home_ble_wifi_e2e.py
+  python3 examples/run_virtual_home_interactive.py --verify-first --non-interactive
   # python3 cirque/home/test/test_home.py
   deactivate
 }

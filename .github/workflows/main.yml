@@ -1,39 +1,94 @@
-# This is a basic workflow to help you get started with Actions
+# Copyright 2020-2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-name: CI
+name: Cirque Quality Gate CI
 
-# Controls when the action will run. Triggers the workflow on push or pull request
-# events but only for the master branch
 on:
   push:
-    branches: [ master ]
+    branches:
+      - master
+      - main
+      - 'feature/**'
   pull_request:
-    branches: [ master ]
+  workflow_dispatch:
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+permissions:
+  contents: read
+
 jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
-    runs-on: ubuntu-20.04
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
+  virtual-rf-unit-and-coverage:
+    name: Virtual RF & Home Topology Unit Tests (>=95% Coverage Gate)
+    runs-on: ubuntu-latest
     steps:
-    # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-    - uses: actions/checkout@v2
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
-    # Runs a single command using the runners shell
-    - name: Cirque Presubmit
-      run: |
-        sudo apt install curl gnupg
-        curl -fsSL https://bazel.build/bazel-release.pub.gpg | gpg --dearmor > bazel.gpg
-        sudo mv bazel.gpg /etc/apt/trusted.gpg.d/
-        echo "deb [arch=amd64] https://storage.googleapis.com/bazel-apt stable jdk1.8" | sudo tee /etc/apt/sources.list.d/bazel.list
-        sudo apt update && sudo apt install bazel
-        sudo apt-get install socat psmisc tigervnc-standalone-server tigervnc-viewer python3-pip python3-venv python3-setuptools
-        # sudo pip3 install pycodestyle==2.5.0
-        sudo pip3 install yapf==0.31.0
-        sudo pip3 install protobuf==3.12.0
-        make pretty-check
-        make install-develop
-        sudo ./run_tests.sh
+      - name: Install system and Python dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-venv python3-dbus python3-gi dbus socat psmisc
+          python3 -m venv --system-site-packages .venv
+          .venv/bin/pip install --upgrade pip setuptools wheel
+          .venv/bin/pip install coverage docker pyroute2 flask requests protobuf
+
+      - name: Run Virtual BT, Virtual Wi-Fi & Home Topology Unit Tests with >=95% Coverage Gate
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          .venv/bin/python -m unittest -v cirque/capabilities/test/test_bluetooth_capability.py
+          .venv/bin/python -m coverage run \
+            --source=cirque/virtual_wifi,cirque/home \
+            -m unittest -v cirque/virtual_wifi/test_virtual_wifi_server.py
+          .venv/bin/python -m coverage report \
+            --include="*/cirque/virtual_wifi/*,*/cirque/home/virtual_home_topology.py,*/cirque/home/__init__.py" \
+            --omit="*/test_*" \
+            --fail-under=95 -m
+
+  virtual-home-docker-e2e:
+    name: Virtual Home 2-Docker E2E (Virtual BT + Virtual Wi-Fi)
+    runs-on: ubuntu-latest
+    needs: virtual-rf-unit-and-coverage
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install system and Python dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-venv python3-dbus python3-gi dbus socat psmisc iproute2 iputils-ping
+          python3 -m venv --system-site-packages .venv
+          .venv/bin/pip install --upgrade pip setuptools wheel
+          .venv/bin/pip install coverage docker pyroute2 flask requests protobuf
+
+      - name: Build Virtual RF Node Docker Image
+        run: |
+          docker build -t project-chip/chip-cirque-device-base \
+            -f cirque/resources/Dockerfile.virtual_rf_node cirque/resources
+
+      - name: Run Virtual Wi-Fi Capability Docker Tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          .venv/bin/python -m unittest -v cirque/capabilities/test/test_wifi_capability.py
+
+      - name: Run 2-Docker Virtual Home E2E (BLE Discovery + GATT + WPA2 + CLI Validation)
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          .venv/bin/python -m unittest -v examples/test_virtual_home_ble_wifi_e2e.py
+          .venv/bin/python examples/run_virtual_home_interactive.py --help

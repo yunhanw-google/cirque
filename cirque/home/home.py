@@ -13,29 +13,27 @@
 # limitations under the License.
 
 import atexit
-import docker
 import os
 import time
 import uuid
 
-import cirque.nodes as nodes
-
-from cirque.common.cirquelog import CirqueLog
-from cirque.connectivity.homelan import HomeLan
-from cirque.connectivity.threadsimpipe import ThreadSimPipe
-from cirque.nodes.wifiapnode import WiFiAPNode
-from cirque.nodes.dockernode import DockerNode
 from cirque.capabilities.bluetoothcapability import BlueToothCapability
 from cirque.capabilities.dockernetworkcapability import DockerNetworkCapability
 from cirque.capabilities.interactivecapability import InteractiveCapability
 from cirque.capabilities.lanaccesscapability import LanAccessCapability
 from cirque.capabilities.mountcapability import MountCapability
 from cirque.capabilities.threadcapability import ThreadCapability
+from cirque.capabilities.trafficcontrolcapability import TrafficControlCapability
 from cirque.capabilities.weavecapability import WeaveCapability
 from cirque.capabilities.wificapability import WiFiCapability
 from cirque.capabilities.xvnccapability import XvncCapability
-from cirque.capabilities.trafficcontrolcapability \
-    import TrafficControlCapability
+from cirque.common.cirquelog import CirqueLog
+from cirque.connectivity.homelan import HomeLan
+from cirque.connectivity.threadsimpipe import ThreadSimPipe
+import cirque.nodes as nodes
+from cirque.nodes.dockernode import DockerNode
+from cirque.nodes.wifiapnode import WiFiAPNode
+import docker
 
 
 class CirqueHome:
@@ -63,66 +61,78 @@ class CirqueHome:
       petition_id = ThreadSimPipe.get_next_petition()
       self.thread_petitions[petition] = {
           'petition_id': petition_id,
-          'ncp_id': 0
+          'ncp_id': 0,
       }
     self.thread_petitions[petition]['ncp_id'] += 1
     return self.thread_petitions[petition]['ncp_id']
 
   def create_home(self, home_config):
     self.logger.info('creating home: {}'.format(self.home_id))
+    BlueToothCapability.BLE_ADAPTS_LIST.clear()
+    WiFiCapability.WIFI_STATIONS_LIST.clear()
     for device_config in home_config.values():
       self.add_device(device_config)
     return self.home_id
 
-  def add_device(self, device_config):
-    self.logger.info('Adding device to home {}: {}'.format(
-        self.home_id, device_config))
-    capabilities = []
-    device_type = device_config['type']
-    if 'base_image' in device_config:
-      base_image = device_config['base_image']
-    else:
-      base_image = device_config['type']
-
-    # configure docker network
-    # bluetooth feature uses host network, can not create customize
-    # networks.
-    if 'Bluetooth' in device_config['capability']:
-      pass
-    elif 'docker_network' in device_config and \
-            device_config['docker_network'] == 'Internal':
+  def _append_docker_network_capability(self, device_config, capabilities):
+    """Appends the appropriate Docker network capability to capabilities."""
+    cirque_root = os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    )
+    btvirt_bin = os.path.join(cirque_root, 'bluez', 'emulator', 'btvirt')
+    use_legacy_btvirt = (
+        'Bluetooth' in device_config.get('capability', [])
+        and not device_config.get('use_virtual_bt_tcp', True)
+        and os.path.exists(btvirt_bin)
+    )
+    if use_legacy_btvirt:
+      return
+    net_type = device_config.get('docker_network')
+    if net_type == 'Internal':
       if not self.internal_lan:
-          self.internal_lan = HomeLan(
-            '{}_internal'.format(self.home_id), internal=True)
+        self.internal_lan = HomeLan(f'{self.home_id}_internal', internal=True)
       capabilities.append(self.__make_internal_network_capability())
-    elif 'docker_network' in device_config and \
-            device_config['docker_network'] == 'Ipv6':
+    elif net_type == 'Ipv6':
       if not self.ipv6_lan:
-        self.ipv6_lan = HomeLan('{}_ipv6'.format(self.home_id), ipv6=True)
+        self.ipv6_lan = HomeLan(f'{self.home_id}_ipv6', ipv6=True)
       capabilities.append(self.__make_ipv6_network_capability())
-    elif 'docker_network' in device_config and \
-            device_config['docker_network'] == 'IpvLan':
+    elif net_type == 'IpvLan':
       if not self.ipvlan_lan:
-        self.ipvlan_lan = HomeLan('{}_ipvlan'.format(self.home_id))
+        self.ipvlan_lan = HomeLan(f'{self.home_id}_ipvlan')
       capabilities.append(self.__make_ipvlan_network_capability())
     else:
       if not self.external_lan:
-        self.external_lan = HomeLan('{}_external'.format(self.home_id))
+        self.external_lan = HomeLan(f'{self.home_id}_external')
       capabilities.append(self.__make_external_network_capability())
 
+  def add_device(self, device_config):
+    self.logger.info(
+        'Adding device to home {}: {}'.format(self.home_id, device_config)
+    )
     if 'type' not in device_config:
       self.logger.critical('Cannot create device, type unspecified')
       return
-    if 'capability' in device_config:
-      for capability_name in device_config['capability']:
-        capability = self.__make_capability(capability_name, device_config)
-        if capability is not None:
-          capabilities.append(capability)
+    capabilities = []
+    device_type = device_config['type']
+    base_image = device_config.get('base_image', device_type)
+    self._append_docker_network_capability(device_config, capabilities)
+    for capability_name in device_config.get('capability', []):
+      capability = self.__make_capability(capability_name, device_config)
+      if capability is not None:
+        capabilities.append(capability)
     if device_type == 'wifi_ap':
-      device_node = WiFiAPNode(self.docker_client, base_image=base_image)
+      device_node = WiFiAPNode(
+          self.docker_client,
+          ssid=device_config.get('ssid'),
+          password=device_config.get('psk') or device_config.get('password'),
+          base_image=base_image,
+          capabilities=capabilities,
+          use_virtual_wifi_tcp=device_config.get('use_virtual_wifi_tcp', True),
+      )
     else:
       device_node = DockerNode(
-          self.docker_client, device_type, capabilities, base_image=base_image)
+          self.docker_client, device_type, capabilities, base_image=base_image
+      )
     device_node.run()
     if device_node.id is not None:
       self.home['devices'][device_node.id] = device_node
@@ -160,15 +170,29 @@ class CirqueHome:
     return DockerNetworkCapability(self.ipvlan_lan.name, 'ipvlan')
 
   def __make_bluetooth_capability(self, capability, device_config):
-      num_infs = device_config.get('num_infs', 2)
-      return BlueToothCapability(num_btvirts=num_infs)
+    num_infs = device_config.get('num_infs', 2)
+    use_virtual_bt_tcp = device_config.get('use_virtual_bt_tcp', True)
+    control_port = device_config.get('virtual_bt_control_port', 0)
+    hci_port = device_config.get('virtual_bt_hci_port', 0)
+    phy_port = device_config.get('virtual_bt_phy_port', 0)
+    bd_addr = device_config.get('bd_addr', None)
+    return BlueToothCapability(
+        num_btvirts=num_infs,
+        use_virtual_bt_tcp=use_virtual_bt_tcp,
+        control_port=control_port,
+        hci_port=hci_port,
+        phy_port=phy_port,
+        bd_addr=bd_addr,
+    )
 
   def __make_interactive_capability(self, capability, device_config):
     return InteractiveCapability()
 
   def __make_lan_access_capability(self, capability, device_config):
-    if 'docker_network' in device_config and \
-            device_config['docker_network'] == 'internal':
+    if (
+        'docker_network' in device_config
+        and device_config['docker_network'] == 'internal'
+    ):
       home_lan = self.internal_lan
     else:
       home_lan = self.external_lan
@@ -179,10 +203,16 @@ class CirqueHome:
     return MountCapability(mount_pairs)
 
   def __make_thread_capability(self, capability, device_config):
-    petition = device_config['thread_petition'] \
-        if 'thread_petition' in device_config else 0
-    daemons = device_config['thread_daemon'] \
-        if 'thread_daemon' in device_config else ['wpantund']
+    petition = (
+        device_config['thread_petition']
+        if 'thread_petition' in device_config
+        else 0
+    )
+    daemons = (
+        device_config['thread_daemon']
+        if 'thread_daemon' in device_config
+        else ['wpantund']
+    )
     rcp = 'rcp_mode' in device_config and device_config['rcp_mode']
     node_id = self.__next_thread_node_id(petition)
     return ThreadCapability(node_id, petition, daemons=daemons, rcp=rcp)
@@ -190,31 +220,47 @@ class CirqueHome:
   def __make_trafficcontrolcapability(self, capability, device_config):
     return TrafficControlCapability(
         latencyMs=device_config.get('traffic_control').get('latencyMs', 0),
-        loss=device_config.get('traffic_control').get('loss', 0))
+        loss=device_config.get('traffic_control').get('loss', 0),
+    )
 
   def __make_weave_capability(self, capability, device_config):
     if 'weave_config_file' not in device_config:
-      self.logger.critical('Weave configuration file not found, \
-                cannot initialize Weave capability')
+      self.logger.critical(
+          'Weave configuration file not found,                 cannot'
+          ' initialize Weave capability'
+      )
       return None
     weave_provision_path = os.path.expanduser(
-        device_config['weave_config_file'])
-    target_path = device_config['weave_config_target_path'] \
-        if 'weave_config_target_path' in device_config else None
+        device_config['weave_config_file']
+    )
+    target_path = (
+        device_config['weave_config_target_path']
+        if 'weave_config_target_path' in device_config
+        else None
+    )
     return WeaveCapability(weave_provision_path, target_path)
 
   def __make_wifi_capability(self, capability, device_config):
-    return WiFiCapability()
+    return WiFiCapability(
+        use_virtual_wifi_tcp=device_config.get('use_virtual_wifi_tcp', True),
+        auto_connect=device_config.get('wifi_auto_connect', False),
+    )
 
   def __make_xvnc_capability(self, capability, device_config):
-    localhost = device_config['xvnc_localhost'] \
-        if 'xvnc_localhost' in device_config else True
-    display_id = device_config['display_id'] \
-        if 'display_id' in device_config else 0
-    docker_display_id = device_config['docker_display_id'] \
-        if 'docker_display_id' in device_config else 0
+    localhost = (
+        device_config['xvnc_localhost']
+        if 'xvnc_localhost' in device_config
+        else True
+    )
+    display_id = (
+        device_config['display_id'] if 'display_id' in device_config else 0
+    )
+    docker_display_id = (
+        device_config['docker_display_id']
+        if 'docker_display_id' in device_config
+        else 0
+    )
     return XvncCapability(localhost, display_id, docker_display_id)
-
 
   def get_wifiap_ssid_psk(self, node_id=None):
 

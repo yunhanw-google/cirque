@@ -91,11 +91,23 @@ function build_generic_node_docker_image() {
   popd
 }
 
+function build_virtual_rf_node_docker_image() {
+  pushd .
+  cd "cirque/resources"
+  if [[ "${IMAGES}" != *cirque-virtual-rf-node* ]]; then
+    docker build -t cirque-virtual-rf-node:latest \
+      -t project-chip/chip-cirque-device-base \
+      -f Dockerfile.virtual_rf_node .
+  fi
+  popd
+}
+
 function main() {
   install_bluez
   install_openthread
   build_wifiap_docker_image
   build_generic_node_docker_image
+  build_virtual_rf_node_docker_image
 }
 
 main
