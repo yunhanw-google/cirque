@@ -107,6 +107,34 @@ def destroy_home(home_id):
   return reply
 
 
+@app.route('/virtual_bt_info', methods=['GET'])
+def virtual_bt_info():
+  from cirque.capabilities.bluetoothcapability import BlueToothCapability
+  server = BlueToothCapability.get_or_start_virtual_server()
+  return jsonify({
+      'host': server.host,
+      'control_port': server.control_port,
+      'hci_port': server.hci_port,
+      'phy_port': server.phy_port,
+      'controllers': server.list_controllers(),
+  })
+
+
+@app.route('/virtual_wifi_info', methods=['GET'])
+def virtual_wifi_info():
+  from dataclasses import asdict
+  from cirque.capabilities.wificapability import WiFiCapability
+  server = WiFiCapability.get_or_start_virtual_server()
+  return jsonify({
+      'host': server.host,
+      'control_port': server.control_port,
+      'mgmt_port': server.mgmt_port,
+      'data_port': server.data_port,
+      'aps': [asdict(ap) for ap in server.list_aps()],
+      'stations': [asdict(st) for st in server.list_stations()],
+  })
+
+
 @app.route('/')
 def destroy_homes():
   global homes

@@ -14,60 +14,74 @@
 
 from functools import reduce
 
-import docker
 from cirque.common.cirquelog import CirqueLog
 from cirque.common.utils import sleep_time
+import docker
 
 
 class DockerNode:
 
-  def __init__(self,
-               docker_client,
-               node_type,
-               capabilities=None,
-               base_image=None):
+  def __init__(
+      self, docker_client, node_type, capabilities=None, base_image=None
+  ):
     self._client = docker_client
     self.node_type = node_type
     if base_image:
       self.image_name = base_image
     else:
       self.image_name = node_type
+    try:
+      self._client.images.get(self.image_name)
+    except Exception:  # pylint: disable=broad-exception-caught
+      import os
+
+      self.image_name = os.environ.get(
+          'CHIP_CIRQUE_BASE_IMAGE', 'project-chip/chip-cirque-device-base'
+      )
     self.container = None
     self.capabilities = [] if capabilities is None else capabilities
     self.logger = CirqueLog.get_cirque_logger(self.__class__.__name__)
-    self.logger.info('Capabilites: {}'.format(
-        [c.name for c in self.capabilities]))
+    self.logger.info(
+        'Capabilites: {}'.format([c.name for c in self.capabilities])
+    )
 
   def run(self, **kwargs):
 
     def merge_capapblity_arg(arg0, arg1):
       for key, item in arg1.items():
-        if key in arg0:
-          self.logger.debug('{}: {} {}'.format(key, arg0[key], item))
-          if isinstance(item, list):
-            arg0[key] += item
-          elif isinstance(item, dict):
-            arg0[key].update(item)
-          elif key == 'privileged':
-            arg0[key] |= item
-        else:
+        if key not in arg0:
           arg0[key] = item
+          continue
+        self.logger.debug('{}: {} {}'.format(key, arg0[key], item))
+        if isinstance(item, list):
+          arg0[key] += item
+        elif isinstance(item, dict):
+          arg0[key].update(item)
+        elif key == 'privileged':
+          arg0[key] |= item
       return arg0
 
     capability_run_args = [
         capability.get_docker_run_args(self) for capability in self.capabilities
     ]
-    capability_run_args = reduce(merge_capapblity_arg, capability_run_args,
-                                 {'cap_add': ['SYS_TIME']})
+    capability_run_args = reduce(
+        merge_capapblity_arg, capability_run_args, {'cap_add': ['SYS_TIME']}
+    )
     kwargs.update(capability_run_args)
     self.container = self._client.containers.run(
-        self.image_name, detach=True, **kwargs)
-    self.logger.info('starting container with image {} args={}'.format(
-        self.image_name, kwargs))
+        self.image_name, detach=True, **kwargs
+    )
+    self.logger.info(
+        'starting container with image {} args={}'.format(
+            self.image_name, kwargs
+        )
+    )
     if self.container is None:
       self.logger.error(
           'failed to create container: {}, please check and try again..'.format(
-              self.name))
+              self.name
+          )
+      )
     for capability in self.capabilities:
       capability.enable_capability(self)
 
@@ -76,6 +90,10 @@ class DockerNode:
       for capability in self.capabilities:
         capability.disable_capability(self)
       self.container.stop(timeout=2)
+      try:
+        self.container.remove(force=True)
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
     self.container = None
 
   def __del__(self):
@@ -113,7 +131,7 @@ class DockerNode:
       }
       if network_info[network_name].get('IPv6Gateway', None):
         description.update({
-          'ipv6_addr': network_info[network_name]['GlobalIPv6Address'],
+            'ipv6_addr': network_info[network_name]['GlobalIPv6Address'],
         })
     for capability in self.capabilities:
       description.update(capability.description)

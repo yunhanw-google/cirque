@@ -25,7 +25,14 @@ Cirque provides a gRPC or Flask service to create, destroy and manage multiple h
 
 Cirque provides a set of capabilities available to any node.  Capability typically encapsulates a function that needs specialized support not only within the node (docker container) but also within the Cirque service and the host system.  Capabilities are implemented as Python objects, all inheriting from `BaseCapability`. The following capabilities are currently implemented within Cirque:
 - *Thread Capability*: generic Thread network daemon check and configuration with IPv4/IPv6 setup
-- *WiFi Capability*: generic WiFi network daemon check and configuration with IPv4/IPv6 setup
+- *WiFi Capability*: dual-mode Wi-Fi capability supporting kernel-module-free
+  userspace Virtual Wi-Fi (`cirque/virtual_wifi/`, `fi.w1.wpa_supplicant1` D-Bus
+  + `wlan0` TAP L2 bridge) by default, as well as legacy `mac80211_hwsim` kernel
+  simulation (`use_legacy_hwsim=True`).
+- *Bluetooth Capability*: dual-mode BLE/GATT capability supporting
+  kernel-module-free userspace Virtual Bluetooth (`cirque/virtual_bt/`,
+  `org.bluez` D-Bus + virtual `hci0` interface + H4/TCP medium) by default, as
+  well as legacy `btvirt`/`hci_vhci` simulation (`use_legacy_btvirt=True`).
 - *Weave Capability*: generic Weave-enabled Docker node capability configuration with certificate path.
 - *XVNC Capability*: allows Docker containers to forward its GUI to a remote client.
 - *LAN Access Capability*: grants access to containers inside the Docker network via restricting iptable rules.
@@ -33,13 +40,47 @@ Cirque provides a set of capabilities available to any node.  Capability typical
 - *Mount capability*: allows users to mount arbitrary path to Docker
 - *Traffic Control Capability*: make `tc` command available (adds `NET_ADMIN` caps to the device), also supports enable traffic control config on default interface (`eth0`) on start (requires `iproute2` package).
 
+> For an in-depth architectural breakdown with sequence diagrams and frame
+> formats, see:
+> - [Unified Virtual RF Architecture](docs/VIRTUAL_RF_ARCHITECTURE.md)
+> - [Virtual Bluetooth Design](docs/VIRTUAL_BT_DESIGN.md)
+> - [Virtual Wi-Fi Design](docs/VIRTUAL_WIFI_DESIGN.md)
+
 ### Thread Simulation
 
 For Thread radio simulation, Cirque utilizes the OpenThread network simulator.  When a Thread capability is enabled on a node, Cirque exposes a device in the node that behaves like a connection to a Thread chip.  The Thread device exposed in the node is implemented as a pipe to an OpenThread process running in the host namespace; there is one OpenThread simulation process running in the host namespace for every Thread-enabled node. Each of the simulation processes exchanges 802.15.4 MAC frames with all other OpenThread processes using the loopback interface on the host.  Cirque provides facilities for exporting either a Thread NCP or RCP configurations into the node.
 
+### Bluetooth (BLE & GATT) Simulation
+
+For Bluetooth Low Energy (BLE) and GATT simulation, `BlueToothCapability`
+provides a dual-mode architecture:
+- **Userspace Virtual Bluetooth (Default, Kernel-Module-Free)**: Runs a
+  `VirtualBluetoothServer` (`cirque/virtual_bt/`) over TCP alongside a
+  per-container `org.bluez` system D-Bus daemon (`Adapter1`, `Device1`,
+  `GattService1`, `GattCharacteristic1`, `GattDescriptor1`, `GattManager1`,
+  `LEAdvertisingManager1`), a container-local virtual `hci0` netdevice
+  (`hciconfig`), and an interactive `bluetoothctl` CLI wrapper. Each container
+  remains in its own isolated Docker network namespace while exchanging H4 HCI
+  Advertising, Connection, L2CAP, and ATT/GATT PDUs across the shared virtual RF
+  medium.
+- **Legacy `btvirt` Mode (`use_legacy_btvirt=True`)**: Uses BlueZ `btvirt` and
+  the `hci_vhci` Linux kernel module with host network namespace sharing.
+
 ### WiFi Simulation
 
-For WiFi radio simulation, Cirque utilizes the kernel module `mac80211_hwsim` to simulate the WiFi communication at the MAC level.  Cirque uses the module to create nodes that emulate both WiFi access points and stations. The access to this simulated WiFi environment is mediated using Cirque capabilities.  Cirque can create one or more WiFi networks (each corresponding to a distinct SSID) and a number of virtual devices that bind to those networks.  For example, Cirque can be used to
+For Wi-Fi radio simulation, `WiFiCapability` provides a dual-mode architecture:
+- **Userspace Virtual Wi-Fi (Default, Kernel-Module-Free)**: Runs a
+  `VirtualWiFiServer` (`cirque/virtual_wifi/`) over TCP alongside a
+  per-container `fi.w1.wpa_supplicant1` system D-Bus daemon and a
+  container-local `wlan0` TAP interface. Containers can scan virtual APs
+  (`iwlist wlan0 scan` or D-Bus `Scan`), authenticate via WPA2-PSK 4-way
+  handshake (`AddNetwork` / `SelectNetwork`), obtain IPv4/IPv6 addresses via
+  `dhcpcd wlan0`, and exchange L2 Ethernet frames across the virtual AP bridge
+  only while associated.
+- **Legacy `mac80211_hwsim` Mode (`use_legacy_hwsim=True`)**: Utilizes the Linux
+  kernel module `mac80211_hwsim` to simulate Wi-Fi communication at the kernel
+  MAC level across `hostapd` AP containers and `wpa_supplicant` station
+  containers. For example, Cirque can be used to:
 
 - create a home
 - create, say, five nodes with WiFi capabilities.
@@ -76,14 +117,16 @@ Build WiFi access point and WiFi station Docker images
 ```
 sh dependency_modules.sh
 ```
-Bring up Cirque Flask or GRPC service
+Bring up Cirque Flask or gRPC service:
+```bash
+# Flask:
+FLASK_APP=cirque/restservice/service.py python3 -m flask run
+# gRPC:
+python3 -m cirque.grpc.service
 ```
-Flask: sudo bazel run //cirque/restservice:service
-GRPC: bazel build //cirque/grpc:service &&
-sudo ./bazel-bin/cirque/grpc/service
- ```
-Run example tests (Flask/GRPC)
-```
+Run example tests (Virtual Home BLE+Wi-Fi / Flask / gRPC):
+```bash
+PYTHONPATH=. python3 -m unittest -v examples/test_virtual_home_ble_wifi_e2e.py
 python3 examples/test_flask_virtual_home.py
 python3 examples/test_grpc_virtual_home.py
 ```
