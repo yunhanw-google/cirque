@@ -89,7 +89,7 @@ class DockerNode:
     if hasattr(self, 'container') and self.container:
       for capability in self.capabilities:
         capability.disable_capability(self)
-      self.container.stop(timeout=2)
+      self.container.stop(timeout=0)
       try:
         self.container.remove(force=True)
       except Exception:  # pylint: disable=broad-exception-caught

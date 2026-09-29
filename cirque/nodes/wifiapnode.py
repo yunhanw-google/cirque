@@ -131,7 +131,7 @@ class WiFiAPNode(DockerNode):
   def stop(self):
     if hasattr(self, "container") and self.container:
       self.__teardown()
-      self.container.stop(timeout=2)
+      self.container.stop(timeout=0)
       try:
         self.container.remove(force=True)
       except Exception:  # pylint: disable=broad-exception-caught
