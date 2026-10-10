@@ -34,6 +34,7 @@ class HomeLan:
       self.__create_ipvlan_network()
     else:
       self.__create_docker_network()
+      self.__inspect_network_properties()
       # bypass disable mutual access for ipv4
       # in ipv6 feature.
       if 'ipv6' not in self.__name:
@@ -44,6 +45,7 @@ class HomeLan:
     # the host when creating networks. The `docker network inspect`isn't
     # supported neither so we use bash commands directly.
     cmd = ['docker', 'network', 'create', self.__name]
+    used_subnet = IPV6_SUBNET
     if self.__internal:
       cmd.append('--internal')
     elif self.__ipv6:
@@ -51,10 +53,19 @@ class HomeLan:
       cmd.append('--gateway="{}"'.format(IPV6_GATEWAY))
       cmd.append('--ipv6')
     ret = host_run(self.logger, cmd)
+    if ret.returncode != 0 and self.__ipv6:
+      subnet_id = abs(hash(self.__name)) & 0xFFFF
+      used_subnet = f'fd00:c17c:{subnet_id:04x}::/64'
+      alt_gw = f'fd00:c17c:{subnet_id:04x}::1'
+      cmd = [
+          'docker', 'network', 'create', self.__name,
+          f'--subnet="{used_subnet}"', f'--gateway="{alt_gw}"', '--ipv6',
+      ]
+      ret = host_run(self.logger, cmd)
     if ret.returncode != 0:
       self.logger.error('Failed to create home lan %s', self.__name)
     if self.__ipv6:
-      self.__enable_ipv6_external_access()
+      self.__enable_ipv6_external_access(used_subnet)
 
   def __create_ipvlan_network(self):
     interface_command = "route | awk '/default / {print $8}'"
@@ -85,7 +96,8 @@ class HomeLan:
     self.__inspect_network_properties()
 
   def __disable_container_mutual_access(self):
-    self.__inspect_network_properties()
+    if not self.subnet:
+      return
     manipulate_iptable_src_dst_rule(self.logger, self.subnet, self.subnet,
                                     'DROP')
     manipulate_iptable_src_dst_rule(self.logger, self.gateway, self.subnet,
@@ -97,15 +109,17 @@ class HomeLan:
     flush_command = "ip6tables -t nat -F"
     ret = host_run(self.logger, flush_command)
     if ret.returncode != 0:
-      self.logger.error("Unable to flush nat rule from ipv6...")
+      self.logger.debug("Unable to flush nat rule from ipv6...")
 
-  def __enable_ipv6_external_access(self):
-    ip6tables_command = " ".join(
-      ["ip6tables -t nat -A POSTROUTING -s {}".format(IPV6_SUBNET),
-       "! -o docker0 -j MASQUERADE"])
+  def __enable_ipv6_external_access(self, subnet=None):
+    target_subnet = subnet or self.subnet or IPV6_SUBNET
+    ip6tables_command = " ".join([
+        "ip6tables -t nat -A POSTROUTING -s {}".format(target_subnet),
+        "! -o docker0 -j MASQUERADE",
+    ])
     ret = host_run(self.logger, ip6tables_command)
     if ret.returncode != 0:
-      self.logger.error('Fail to setup ipv6 external access in ip6tables')
+      self.logger.debug("Fail to setup ipv6 external access in ip6tables")
 
   def __inspect_network_properties(self):
     ret = host_run(self.logger, ['docker', 'network', 'inspect', self.__name])
@@ -116,12 +130,22 @@ class HomeLan:
     if not network_info:
       self.logger.error('Failed to inspect home lan %s' % self.__name)
       return
-    network_configs = network_info[0]['IPAM']['Config']
-    if 'ipv6' not in self.__name and len(network_configs) != 1:
-      self.logger.error('Unexpected network behavior on home lan %s' %
-                        self.__name)
-    self.subnet = network_configs[0]['Subnet']
-    self.gateway = network_configs[0]['Gateway']
+    network_configs = network_info[0].get('IPAM', {}).get('Config', [])
+    if not network_configs:
+      return
+    for cfg in network_configs:
+      subnet = cfg.get('Subnet', '')
+      if self.__ipv6 and ':' in subnet:
+        self.subnet = subnet
+        self.gateway = cfg.get('Gateway')
+        break
+      elif not self.__ipv6 and '.' in subnet:
+        self.subnet = subnet
+        self.gateway = cfg.get('Gateway')
+        break
+    if not self.subnet:
+      self.subnet = network_configs[0].get('Subnet')
+      self.gateway = network_configs[0].get('Gateway')
 
   def close(self):
     if not self.subnet:
