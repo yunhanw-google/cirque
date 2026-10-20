@@ -93,9 +93,24 @@ class VirtualBluetoothController:
     with self._lock:
       self._pcap_writer = writer
 
+  def _effective_bd_addr(self) -> str:
+    with self._lock:
+      if (
+          self.state.own_addr_type == 0x01
+          and self.state.random_addr
+          and self.state.random_addr != '00:00:00:00:00:00'
+      ):
+        return self.state.random_addr.upper()
+      return self.state.bd_addr.upper()
+
   def close(self) -> None:
     self._adv_stop_event.set()
     self.phy_hub.unregister_local_endpoint(self.state.bd_addr)
+    if (
+        self.state.random_addr
+        and self.state.random_addr != '00:00:00:00:00:00'
+    ):
+      self.phy_hub.unregister_local_endpoint(self.state.random_addr.upper())
     if self._pcap_writer is not None:
       self._pcap_writer.close()
       self._pcap_writer = None
@@ -134,9 +149,7 @@ class VirtualBluetoothController:
       if not self.state.adv_enabled:
         return
       adv_payload, addr_type = self.state.adv_data, self.state.own_addr_type
-      src_addr = (
-          self.state.random_addr if addr_type == 0x01 else self.state.bd_addr
-      )
+      src_addr = self._effective_bd_addr()
     self.phy_hub.transmit(
         LinkLayerFrame(
             pdu_type=LinkLayerPduType.ADV_IND.value,
@@ -223,7 +236,18 @@ class VirtualBluetoothController:
   def _handle_le_adv_or_scan_command(self, opcode: int, params: bytes) -> bool:
     """Handles LE advertising and scanning configuration HCI opcodes."""
     if opcode == HciOpcode.LE_SET_RANDOM_ADDRESS and len(params) >= 6:
-      self.state.random_addr = bdaddr_bytes_to_str(params[:6])
+      new_rand = bdaddr_bytes_to_str(params[:6]).upper()
+      with self._lock:
+        old_rand = self.state.random_addr.upper()
+        self.state.random_addr = new_rand
+      if (
+          old_rand
+          and old_rand != '00:00:00:00:00:00'
+          and old_rand != self.state.bd_addr
+      ):
+        self.phy_hub.unregister_local_endpoint(old_rand)
+      if new_rand and new_rand != '00:00:00:00:00:00':
+        self.phy_hub.register_local_endpoint(new_rand, self.on_phy_frame)
     elif opcode == HciOpcode.LE_SET_ADVERTISING_PARAMETERS:
       if len(params) < 15:
         self.emit_h4(build_command_complete_event(opcode, 0x12))
@@ -461,7 +485,7 @@ class VirtualBluetoothController:
         self.phy_hub.transmit(
             LinkLayerFrame(
                 pdu_type=LinkLayerPduType.LL_TERMINATE_IND.value,
-                src_bd_addr=self.state.bd_addr,
+                src_bd_addr=self._effective_bd_addr(),
                 dst_bd_addr=peer_addr,
                 reason=reason,
             )
@@ -564,7 +588,7 @@ class VirtualBluetoothController:
       self.phy_hub.transmit(
           LinkLayerFrame(
               pdu_type=LinkLayerPduType.LL_DATA.value,
-              src_bd_addr=self.state.bd_addr,
+              src_bd_addr=self._effective_bd_addr(),
               dst_bd_addr=peer_addr,
               payload_hex=payload[4:].hex(),
           )
@@ -673,7 +697,7 @@ class VirtualBluetoothController:
         self.phy_hub.transmit(
             LinkLayerFrame(
                 pdu_type=LinkLayerPduType.SCAN_RSP.value,
-                src_bd_addr=self.state.bd_addr,
+                src_bd_addr=self._effective_bd_addr(),
                 dst_bd_addr=frame.src_bd_addr,
                 src_addr_type=self.state.own_addr_type,
                 payload_hex=scan_rsp.hex() if scan_rsp else '',
@@ -726,7 +750,7 @@ class VirtualBluetoothController:
       self.phy_hub.transmit(
           LinkLayerFrame(
               pdu_type=LinkLayerPduType.CONNECT_RSP.value,
-              src_bd_addr=self.state.bd_addr,
+              src_bd_addr=self._effective_bd_addr(),
               dst_bd_addr=frame.src_bd_addr,
               src_addr_type=self.state.own_addr_type,
               dst_addr_type=frame.src_addr_type,
