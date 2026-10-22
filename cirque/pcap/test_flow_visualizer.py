@@ -305,6 +305,65 @@ class SequenceDiagramTest(FlowVisualizerTestBase):
     self.assertIn('const INITIAL_INDEX = 0;', page)
     self.assertIn('id="stage-jump-select"', page)
 
+  def test_wifi_macs_map_to_station_lanes_and_ap_lane(self):
+    logs = self.log_events([EM_SIGMA1_RX, EM_SIGMA2_TX])
+    logs += self.log_events([LOGCAT_SIGMA1_TX], name=LOGCAT_LOG)
+    capture = _event(
+        'sigma1_pcap',
+        1791928975.26,
+        pcap_file='wifi_medium.pcap',
+        src_ip='10.0.1.21',
+        dst_ip='10.0.1.20',
+        src_mac='02:00:00:00:02:0C',
+        dst_mac='02:00:00:00:02:0B',
+        matter_msg_key=fv.matter_message_key(241328646, 5440, 0, 0x30),
+    )
+    eapol = _event(
+        'eapol_1',
+        1791928970.0,
+        pcap_file='wifi_medium.pcap',
+        src_mac='02:00:00:00:01:01',
+        dst_mac='02:00:00:00:02:0C',
+    )
+    eapol.sublayer = 'EAPOL'
+    # A second station that only associates (no IP traffic) and its EAPOL
+    # reply; the AP is the MAC that runs EAPOL with both stations.
+    eapol_2 = _event(
+        'eapol_2',
+        1791928971.0,
+        pcap_file='wifi_medium.pcap',
+        src_mac='02:00:00:00:02:0D',
+        dst_mac='02:00:00:00:01:01',
+    )
+    eapol_2.sublayer = 'EAPOL'
+    aliases = fv.infer_lane_aliases(logs + [capture, eapol, eapol_2])
+    # The station MAC follows the IP it carried; only the AP gets the AP lane.
+    self.assertEqual(aliases['02:00:00:00:02:0c'], fv.LANE_CONTROLLER)
+    self.assertEqual(aliases['02:00:00:00:01:01'], fv.LANE_WIFI_AP)
+    self.assertEqual(aliases['02:00:00:00:02:0d'], fv.LANE_ACCESSORY)
+    self.assertEqual(
+        aliases[fv._lane_alias_key(fv.DHCP_SERVER_ENDPOINT)], fv.LANE_WIFI_AP
+    )
+
+  def test_connect_network_stage_follows_the_added_network(self):
+    def cmd(event_id, ts, command):
+      ev = _event(event_id, ts, layer='MATTER', stage='CLUSTER_CONTROL',
+                  matter_command=command)
+      return ev
+
+    wifi = [
+        cmd('add_wifi', 10.0, 'AddOrUpdateWiFiNetwork'),
+        cmd('connect_wifi', 11.0, 'ConnectNetwork'),
+    ]
+    thread = [
+        cmd('add_thread', 20.0, 'AddOrUpdateThreadNetwork'),
+        cmd('connect_thread', 21.0, 'ConnectNetwork'),
+    ]
+    merged = fv.merge_and_sort_flow_events(list(reversed(wifi + thread)), [])
+    stages = {ev.event_id: ev.stage for ev in merged}
+    self.assertEqual(stages['connect_wifi'], 'WIFI_PROVISIONED')
+    self.assertEqual(stages['connect_thread'], 'THREAD_PROVISIONED')
+
   def test_evidence_tiers_have_legend_and_arrow_styles(self):
     out = os.path.join(self.temp_dir, 'studio.html')
     fv.generate_flow_html([_event('hci', 1.0, pcap_file='bt_hci_hci0.pcap')],
@@ -482,6 +541,39 @@ class ThreadCaptureTest(FlowVisualizerTestBase):
     self.assertEqual(events[0].layer, 'WIFI')
     self.assertEqual(events[0].sublayer, 'UDP')
     self.assertEqual(events[0].title, 'IPv6 UDP :5540->:5540')
+
+  def test_eth_pcap_ipv4_dhcp_dissected(self):
+    # BOOTREPLY (op=2), xid=0x12345678, yiaddr=192.168.1.2, option 53=Offer.
+    bootp = (
+        struct.pack('>BBBBI', 2, 1, 6, 0, 0x12345678)
+        + bytes(8)
+        + bytes([192, 168, 1, 2])
+        + bytes(8 + 16 + 64 + 128)
+        + struct.pack('>I', 0x63825363)
+        + bytes([53, 1, 2, 255])
+    )
+    udp = struct.pack('>HHHH', 67, 68, 8 + len(bootp), 0) + bootp
+    ipv4 = (
+        struct.pack('>BBHHHBBH', 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0)
+        + bytes([192, 168, 1, 1])
+        + bytes([192, 168, 1, 2])
+    )
+    pkt = bytes.fromhex('ffffffffffff0200000001010800') + ipv4 + udp
+    eth_pcap = os.path.join(self.temp_dir, 'eth_DHCP_1234.pcap')
+    with open(eth_pcap, 'wb') as f:
+      f.write(struct.pack('<IHHiIII', 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
+      f.write(struct.pack('<IIII', 1700000000, 0, len(pkt), len(pkt)) + pkt)
+    events = fv.dissect_pcap_directory(self.temp_dir)
+    self.assertEqual(len(events), 1)
+    self.assertEqual(events[0].layer, 'WIFI')
+    self.assertEqual(events[0].sublayer, 'DHCP')
+    self.assertEqual(events[0].title, 'DHCP Offer')
+    self.assertEqual(
+        (events[0].src, events[0].dst),
+        ('02:00:00:00:01:01', 'FF:FF:FF:FF:FF:FF'),
+    )
+    self.assertTrue(events[0].details.get('decrypted'))
+    self.assertEqual(events[0].details.get('evidence'), 'wire')
 
 
 class ThreadKeysTest(FlowVisualizerTestBase):

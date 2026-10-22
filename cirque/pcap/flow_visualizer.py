@@ -425,6 +425,20 @@ def dissect_le_ll_packet(
   )
 
 
+_DHCP_MAGIC_COOKIE = 0x63825363
+# RFC 2132 option 53 (DHCP Message Type) values.
+_DHCP_MESSAGE_TYPES = {
+    1: 'Discover',
+    2: 'Offer',
+    3: 'Request',
+    4: 'Decline',
+    5: 'Ack',
+    6: 'Nak',
+    7: 'Release',
+    8: 'Inform',
+}
+
+
 def dissect_wifi_packet(
     ts: float, raw_data: bytes, pcap_name: str, index: int
 ) -> Optional[FlowEvent]:
@@ -459,6 +473,8 @@ def dissect_wifi_packet(
     summary = f'WPA2 4-Way Handshake Message {src_mac} -> {dst_mac}'
     encap.append('WPA2 EAPOL')
     details['auth_protocol'] = 'WPA2-PSK'
+    details['decrypted'] = True
+    details['evidence'] = 'wire'
   elif ethertype == 0x0806:  # ARP
     sublayer = 'ARP'
     title = 'ARP Request / Reply'
@@ -487,6 +503,46 @@ def dissect_wifi_packet(
           title = 'mDNS Service Discovery'
           summary = f'Multicast DNS Query/Response {src_ip}:{src_port}'
           encap.append('mDNS (5353)')
+        elif dst_port in (67, 68) or src_port in (67, 68):
+          sublayer = 'DHCP'
+          title = 'DHCP Message'
+          summary = f'DHCP {src_ip}:{src_port} -> {dst_ip}:{dst_port}'
+          details['evidence'] = 'wire'
+          details['decrypted'] = True
+          # DHCP runs before the station has an address (0.0.0.0 ->
+          # 255.255.255.255), so draw it between link-layer endpoints.
+          src = src_mac
+          dst = (
+              DHCP_SERVER_ENDPOINT
+              if dst_mac == 'FF:FF:FF:FF:FF:FF' and dst_port == 67
+              else dst_mac
+          )
+          udp_payload = l3_payload[28:]
+          # BOOTP fixed header (236 bytes) + magic cookie, then options.
+          if len(udp_payload) >= 240:
+            xid = struct.unpack('>I', udp_payload[4:8])[0]
+            yiaddr = '.'.join(str(b) for b in udp_payload[16:20])
+            magic = struct.unpack('>I', udp_payload[236:240])[0]
+            msg_type = 'Message'
+            idx = 240
+            while magic == _DHCP_MAGIC_COOKIE and idx + 1 < len(udp_payload):
+              opt = udp_payload[idx]
+              if opt == 255:  # End
+                break
+              if opt == 0:  # Pad
+                idx += 1
+                continue
+              opt_len = udp_payload[idx + 1]
+              if opt == 53 and opt_len == 1 and idx + 2 < len(udp_payload):
+                code = udp_payload[idx + 2]
+                msg_type = _DHCP_MESSAGE_TYPES.get(code, f'Type {code}')
+              idx += 2 + opt_len
+            title = f'DHCP {msg_type}'
+            summary = f'{title} xid=0x{xid:08x} yiaddr={yiaddr}'
+            encap.append(f'DHCP ({msg_type})')
+            details['dhcp_message_type'] = msg_type
+            details['dhcp_xid'] = f'0x{xid:08x}'
+            details['dhcp_yiaddr'] = yiaddr
   elif ethertype == 0x86DD:  # IPv6
     sublayer = 'IPv6'
     encap.append('IPv6')
@@ -2283,9 +2339,29 @@ def merge_and_sort_flow_events(
 
   # Sort chronologically
   combined.sort(key=lambda ev: ev.timestamp)
+  _stage_connect_network_by_added_network(combined)
   combined = _dedup_flow_events(combined)
   _join_message_events(combined)
   return combined
+
+
+# ConnectNetwork names no network type, so it belongs to the stage of the most
+# recent AddOrUpdate*Network (Wi-Fi or Thread) from any source.
+_ADD_NETWORK_STAGES = {
+    'AddOrUpdateWiFiNetwork': 'WIFI_PROVISIONED',
+    'AddOrUpdateThreadNetwork': 'THREAD_PROVISIONED',
+}
+
+
+def _stage_connect_network_by_added_network(events: List[FlowEvent]) -> None:
+  """Re-stages ConnectNetwork events; `events` must be in timestamp order."""
+  last_stage = None
+  for ev in events:
+    command = (ev.details or {}).get('matter_command', '')
+    if command in _ADD_NETWORK_STAGES:
+      last_stage = _ADD_NETWORK_STAGES[command]
+    elif command == 'ConnectNetwork' and last_stage:
+      ev.stage = last_stage
 
 
 # Copies of one frame in several captures (medium, AP and per-station taps)
@@ -2368,6 +2444,10 @@ DEFAULT_FOCUS_STAGES = ('PASE_HANDSHAKE', 'CASE_CONNECT')
 LANE_CONTROLLER = 0
 LANE_BORDER_ROUTER = 2
 LANE_ACCESSORY = 3
+LANE_WIFI_AP = 4
+# Endpoint for broadcast DHCP Discover/Request frames; drawn on the Wi-Fi AP
+# lane, where the Cirque DHCP server runs.
+DHCP_SERVER_ENDPOINT = 'DHCP server (broadcast)'
 
 
 def _event_field(ev: Union[FlowEvent, Dict[str, Any]], name: str) -> Any:
@@ -2410,6 +2490,9 @@ def infer_lane_aliases(events: List[FlowEvent]) -> Dict[str, int]:
     a relay sits in between: that address and the address the controller
     sends to (for example a border router wlan0 IP) go to the Border Router
     lane.
+  - The MAC that runs EAPOL with the most stations is the Wi-Fi AP. A station
+    MAC follows the lane of an IP it sends from; any other station goes to the
+    Accessory lane.
   - details['lane_aliases'] ({endpoint: lane}) set by plugins wins.
   """
   aliases: Dict[str, int] = {}
@@ -2455,14 +2538,45 @@ def infer_lane_aliases(events: List[FlowEvent]) -> Dict[str, int]:
       controller_ips.add(_lane_alias_key(dst))
       far_ends.add(_lane_alias_key(src) if src else '')
   far_ends.discard('')
+  ip_to_mac = {}
+  # EAPOL always runs between the AP and one station, so the AP is the MAC
+  # that runs EAPOL with the most distinct peers.
+  eapol_peers: Dict[str, set] = {}
+  for ev in events:
+    d = ev.details
+    src_ip = d.get('src_ip') or d.get('src_ip6')
+    src_mac, dst_mac = d.get('src_mac'), d.get('dst_mac')
+    if src_ip and src_mac and src_ip != '0.0.0.0':
+      ip_to_mac[_lane_alias_key(src_ip)] = _lane_alias_key(src_mac)
+    if ev.sublayer == 'EAPOL' and src_mac and dst_mac:
+      a, b = _lane_alias_key(src_mac), _lane_alias_key(dst_mac)
+      eapol_peers.setdefault(a, set()).add(b)
+      eapol_peers.setdefault(b, set()).add(a)
+
   for addr in controller_ips:
     aliases.setdefault(addr, LANE_CONTROLLER)
+    if addr in ip_to_mac:
+      aliases.setdefault(ip_to_mac[addr], LANE_CONTROLLER)
   relays = dev_peers - controller_ips
   if controller_ips and relays:
     for addr in (ctrl_peers | relays) - controller_ips:
       aliases.setdefault(addr, LANE_BORDER_ROUTER)
+      if addr in ip_to_mac:
+        aliases.setdefault(ip_to_mac[addr], LANE_BORDER_ROUTER)
   for addr in far_ends - controller_ips:
     aliases.setdefault(addr, LANE_ACCESSORY)
+    if addr in ip_to_mac:
+      aliases.setdefault(ip_to_mac[addr], LANE_ACCESSORY)
+  if eapol_peers:
+    ap_mac = max(
+        sorted(eapol_peers),
+        key=lambda m: (len(eapol_peers[m]), m not in aliases),
+    )
+    aliases[ap_mac] = LANE_WIFI_AP
+    aliases.setdefault(_lane_alias_key(DHCP_SERVER_ENDPOINT), LANE_WIFI_AP)
+    # Stations not already placed by their IP traffic are end devices.
+    for mac in eapol_peers[ap_mac]:
+      aliases.setdefault(mac, LANE_ACCESSORY)
   aliases.update(forced)
   return aliases
 
@@ -2826,7 +2940,7 @@ def generate_flow_html(
                 bg-[var(--primary)] text-[var(--primary-foreground)]
                 focus-visible:ring-2 focus-visible:ring-[var(--ring)]
                 transition-colors">
-              4-Lane Role View
+              Role Lane View
             </button>
             <button type="button" id="btn-seq-mode-dynamic"
               onclick="setSeqMode('DYNAMIC')"
@@ -3182,13 +3296,16 @@ def generate_flow_html(
     let activeLayers = new Set(ALL_LAYER_NAMES);
     let searchQuery = '';
     let seqMode = 'CANONICAL';
-    let seqScope = 'WINDOW';
+    // Typical Wi-Fi/Thread commissioning captures (a few thousand frames)
+    // render in full so provisioning frames far from PASE stay visible.
+    let seqScope = (ALL_EVENTS.length <= 5000) ? 'ALL' : 'WINDOW';
 
     const CANONICAL_LANES = [
       'Controller / Mobile',
       'Virtual Radio / Medium',
       'Border Router / Gateway',
       'Accessory / End Device',
+      'Wi-Fi AP',
     ];
     const SEQ_BTN_ACTIVE = [
       'px-2.5 py-1 rounded-md text-xs font-medium',
@@ -3556,10 +3673,17 @@ def generate_flow_html(
           const sub = ev.sublayer && ev.sublayer !== ev.layer
             ? `${{layerUpper}} • ${{ev.sublayer}}`
             : layerUpper;
-          const rawTitle = `[#${{realIdx + 1}}] [${{sub}}] ${{ev.title || ''}}`;
-          const shortTitle = rawTitle.length > 48
-            ? rawTitle.slice(0, 46) + '..'
+          // The frame number is already in the left gutter. Long titles keep
+          // their head and tail, where command names such as
+          // AddOrUpdateWiFiNetwork sit.
+          const rawTitle = `[${{sub}}] ${{ev.title || ''}}`;
+          const compactTitle = rawTitle.length > 48
+            ? rawTitle.replace(/\\(0x[0-9a-fA-F]+\\)/g, '')
+                .replace(/\\s+/g, ' ')
             : rawTitle;
+          const shortTitle = compactTitle.length > 48
+            ? compactTitle.slice(0, 18) + '…' + compactTitle.slice(-29)
+            : compactTitle;
           const isIntent = ev.details && ev.details.evidence === 'controller_intent';
           const isRelay = ev.details && ev.details.evidence === 'relay';
           const isLog = ev.details && ev.details.evidence === 'device_log';
@@ -4072,7 +4196,7 @@ def generate_flow_html(
     window.onload = () => {{
       syncLayerControlStyles();
       renderEventsList();
-      renderSequenceDiagram();
+      setSeqScope(seqScope);
       if (ALL_EVENTS.length > 0) {{
         selectFrame(Math.min(INITIAL_INDEX, ALL_EVENTS.length - 1));
       }}
