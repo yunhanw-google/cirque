@@ -306,6 +306,21 @@ class WpaSupplicantDbusService:
         GLib.Variant('(a{sv})', (changed,)),
     )
 
+  @staticmethod
+  def _extract_scan_filter_ssids(params) -> Optional[List[str]]:
+    """Extracts the optional SSIDs filter list from a D-Bus Scan(a{sv}) call."""
+    if params is None:
+      return None
+    try:
+      args_dict = params.unpack()[0]
+      if isinstance(args_dict, dict) and 'SSIDs' in args_dict:
+        return [
+            _decode_dbus_bytes_or_str(s) for s in args_dict['SSIDs']
+        ]
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      logger.debug('Could not parse scan filter args: %s', exc)
+    return None
+
   def _handle_scan_method(
       self,
       conn,
@@ -314,18 +329,7 @@ class WpaSupplicantDbusService:
       invocation,
       params=None,
   ) -> None:
-    filter_ssids = None
-    if params is not None:
-      try:
-        args_dict = params.unpack()[0]
-        if isinstance(args_dict, dict) and 'SSIDs' in args_dict:
-          raw_ssids = args_dict['SSIDs']
-          parsed_ssids = []
-          for s in raw_ssids:
-            parsed_ssids.append(_decode_dbus_bytes_or_str(s))
-          filter_ssids = parsed_ssids
-      except Exception as exc:  # pylint: disable=broad-exception-caught
-        logger.debug('Could not parse scan filter args: %s', exc)
+    filter_ssids = self._extract_scan_filter_ssids(params)
 
     bss_paths = self._refresh_bsss_for_station(
         conn, station_id, filter_ssids=filter_ssids

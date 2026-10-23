@@ -254,13 +254,13 @@ class DockerNode:
             time.sleep(0.1)
           if still_running:
             stop_timeout = 2
-        except Exception:  # pylint: disable=broad-exception-caught
-          pass
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+          self.logger.debug('Graceful stop check failed: %s', exc)
       self.container.stop(timeout=stop_timeout)
       try:
         self.container.remove(force=True)
-      except Exception:  # pylint: disable=broad-exception-caught
-        pass
+      except Exception as exc:  # pylint: disable=broad-exception-caught
+        self.logger.debug('Container remove failed: %s', exc)
     self.container = None
 
   def __del__(self):

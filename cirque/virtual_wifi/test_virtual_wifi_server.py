@@ -1224,10 +1224,9 @@ class TestVirtualWiFiControllerSystem(unittest.TestCase):
     )
 
     class DummyCap:
-      BLE_ADAPTS_LIST = []
-      WIFI_STATIONS_LIST = []
 
       def __init__(self, *args, **kwargs):
+        del args, kwargs
         self.name = 'Dummy'
         self.description = {'cap': 'val'}
 
@@ -1240,6 +1239,9 @@ class TestVirtualWiFiControllerSystem(unittest.TestCase):
 
       def disable_capability(self, dockernode):
         del dockernode
+
+    DummyCap.BLE_ADAPTS_LIST = []
+    DummyCap.WIFI_STATIONS_LIST = []
 
     mock_sim_pipe = SimpleNamespace(
         get_next_petition=staticmethod(lambda: 10),

@@ -22,7 +22,7 @@ import os
 import struct
 import threading
 import time
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from cirque.virtual_bt.bluez_gatt_helpers import (
     acquire_gatt_characteristic_fd,
@@ -41,6 +41,24 @@ class BluezGattPeripheralMixin:
     with self.docker_manager._lock:  # pylint: disable=protected-access
       return build_managed_objects_dict(self.docker_manager.adapter_bridges)
 
+  def _emit_gatt_tree_added(self, base_path: str, objs: Dict[str, Any]) -> None:
+    """Emits InterfacesAdded for a device and its GATT service/char paths."""
+    from gi.repository import GLib  # pylint: disable=g-import-not-at-top
+
+    for path in (
+        base_path,
+        f'{base_path}/service00',
+        f'{base_path}/service00/char00',
+        f'{base_path}/service00/char01',
+    ):
+      if path in objs:
+        self._emit_all(
+            '/',
+            'org.freedesktop.DBus.ObjectManager',
+            'InterfacesAdded',
+            GLib.Variant('(oa{sa{sv}})', (path, objs[path])),
+        )
+
   def _on_peripheral_discovered(
       self, controller_id: str, addr: str, _info: Dict[str, object]
   ) -> None:
@@ -50,8 +68,9 @@ class BluezGattPeripheralMixin:
       return
     is_first_discovery = False
     with self._lock:
-      if hasattr(self, '_discovered_dev_paths') and dev_path not in self._discovered_dev_paths:
-        self._discovered_dev_paths.add(dev_path)
+      discovered = getattr(self, '_discovered_dev_paths', None)
+      if discovered is not None and dev_path not in discovered:
+        discovered.add(dev_path)
         is_first_discovery = True
 
     try:
@@ -59,19 +78,7 @@ class BluezGattPeripheralMixin:
 
       objs = self._build_managed_objects_dict()
       if is_first_discovery:
-        for path in (
-            dev_path,
-            f'{dev_path}/service00',
-            f'{dev_path}/service00/char00',
-            f'{dev_path}/service00/char01',
-        ):
-          if path in objs:
-            self._emit_all(
-                '/',
-                'org.freedesktop.DBus.ObjectManager',
-                'InterfacesAdded',
-                GLib.Variant('(oa{sa{sv}})', (path, objs[path])),
-            )
+        self._emit_gatt_tree_added(dev_path, objs)
       if dev_path in objs and 'org.bluez.Device1' in objs[dev_path]:
         dev_props = objs[dev_path]['org.bluez.Device1']
         changed = {
@@ -86,6 +93,31 @@ class BluezGattPeripheralMixin:
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
       logger.debug('InterfacesAdded emit failed: %s', exc)
+
+  @staticmethod
+  def _enable_peripheral_c2_cccd(p_bridge) -> None:
+    """Enables indications (0x0002) on the peripheral's C2 CCCD handle."""
+    db = p_bridge.att_server.database
+    c2_info = db.find_characteristic_by_uuid(
+        '18ee2ef5-263d-4559-959f-4f9c429f9d12'
+    )
+    if c2_info is None:
+      return
+    cccd_h = db.find_cccd_for_char(c2_info[1])
+    if cccd_h is not None:
+      p_bridge.att_server.cccd_states[cccd_h] = 0x0002
+
+  def _notify_peripheral_c2_subscribers(
+      self, bridge, peer_addr: str
+  ) -> None:
+    """Worker that enables C2 indications and acquires notify sockets."""
+    time.sleep(0.05)
+    for p_cid, p_bridge in list(self.docker_manager.adapter_bridges.items()):
+      if p_bridge.bd_addr.upper() != peer_addr.upper():
+        continue
+      self._enable_peripheral_c2_cccd(p_bridge)
+      if p_cid in self._get_c1_written_set():
+        self._acquire_peripheral_c2_notify(p_cid, bridge.bd_addr)
 
   def _get_c1_written_set(self) -> set:
     """Returns the per-instance set of controllers with an active C1 write."""
@@ -303,6 +335,23 @@ class BluezGattPeripheralMixin:
       except OSError:
         break
 
+  @staticmethod
+  def _resolve_peripheral_conn_handle(p_bridge, central_bd_addr: str) -> int:
+    """Resolves the active connection handle on `p_bridge` for central."""
+    if not p_bridge.h4_client:
+      return 0x0040
+    target_addr = central_bd_addr.upper()
+    with p_bridge.h4_client._cv:  # pylint: disable=protected-access
+      conns = (
+          p_bridge.h4_client._connections  # pylint: disable=protected-access
+      )
+      for ch, cdata in conns.items():
+        if str(cdata.get('peer_bd_addr', '')).upper() == target_addr:
+          return ch
+      if conns:
+        return next(iter(conns.keys()))
+    return 0x0040
+
   def _connect_device_worker(
       self,
       cid: str,
@@ -319,39 +368,21 @@ class BluezGattPeripheralMixin:
     try:
       bridge.connect_to_peripheral(peer_addr)
       for p_cid, p_bridge in list(self.docker_manager.adapter_bridges.items()):
-        if p_bridge.bd_addr.upper() == peer_addr.upper():
-          p_bridge.discovered_peripherals[bridge.bd_addr] = {
-              'bd_addr': bridge.bd_addr,
-              'rssi': -45,
-              'discriminator': 0,
-          }
-          p_handle = 0x0040
-          if p_bridge.h4_client:
-            with p_bridge.h4_client._cv:
-              for ch, cdata in p_bridge.h4_client._connections.items():
-                if str(cdata.get('peer_bd_addr', '')).upper() == bridge.bd_addr.upper():
-                  p_handle = ch
-                  break
-              else:
-                if p_bridge.h4_client._connections:
-                  p_handle = next(iter(p_bridge.h4_client._connections.keys()))
-          p_bridge.connected_handles[p_handle] = bridge.bd_addr
-          self._acquire_peripheral_gatt_sockets(p_cid, bridge.bd_addr)
+        if p_bridge.bd_addr.upper() != peer_addr.upper():
+          continue
+        p_bridge.discovered_peripherals[bridge.bd_addr] = {
+            'bd_addr': bridge.bd_addr,
+            'rssi': -45,
+            'discriminator': 0,
+        }
+        p_handle = self._resolve_peripheral_conn_handle(
+            p_bridge, bridge.bd_addr
+        )
+        p_bridge.connected_handles[p_handle] = bridge.bd_addr
+        self._acquire_peripheral_gatt_sockets(p_cid, bridge.bd_addr)
       self._export_device_gatt_tree(cid, peer_addr)
       objs = self._build_managed_objects_dict()
-      for path in (
-          object_path,
-          f'{object_path}/service00',
-          f'{object_path}/service00/char00',
-          f'{object_path}/service00/char01',
-      ):
-        if path in objs:
-          self._emit_all(
-              '/',
-              'org.freedesktop.DBus.ObjectManager',
-              'InterfacesAdded',
-              GLib.Variant('(oa{sa{sv}})', (path, objs[path])),
-          )
+      self._emit_gatt_tree_added(object_path, objs)
       self._emit_all(
           object_path,
           'org.freedesktop.DBus.Properties',
@@ -383,18 +414,9 @@ class BluezGattPeripheralMixin:
         except OSError as exc:
           logger.debug("Failed closing peripheral FD %d: %s", fd, exc)
 
-  def _disconnect_device(
-      self,
-      bridge: VirtualBluezAdapterBridge,
-      object_path: str,
-      invocation,
-  ) -> None:
-    """Disconnects an LE peripheral and closes acquired GATT FDs."""
-    from gi.repository import GLib  # pylint: disable=g-import-not-at-top
-
-    parts = object_path.split('/')
-    dev_part = parts[4] if len(parts) > 4 else parts[-1]
-    peer_addr = dev_part.replace('dev_', '').replace('_', ':')
+  @staticmethod
+  def _disconnect_bridge_handles(bridge: VirtualBluezAdapterBridge) -> None:
+    """Sends HCI Disconnect (0x0406) for all active handles on a bridge."""
     if bridge.h4_client is not None:
       for handle in list(bridge.connected_handles.keys()):
         try:
@@ -408,45 +430,41 @@ class BluezGattPeripheralMixin:
               exc,
           )
     bridge.connected_handles.clear()
+
+  def _disconnect_device(
+      self,
+      bridge: VirtualBluezAdapterBridge,
+      object_path: str,
+      invocation,
+  ) -> None:
+    """Disconnects an LE peripheral and closes acquired GATT FDs."""
+    from gi.repository import GLib  # pylint: disable=g-import-not-at-top
+
+    parts = object_path.split('/')
+    dev_part = parts[4] if len(parts) > 4 else parts[-1]
+    peer_addr = dev_part.replace('dev_', '').replace('_', ':')
+    self._disconnect_bridge_handles(bridge)
+    disconnected_props = GLib.Variant(
+        '(sa{sv}as)',
+        ('org.bluez.Device1', {'Connected': GLib.Variant('b', False)}, []),
+    )
     for p_cid, p_bridge in list(self.docker_manager.adapter_bridges.items()):
       if p_bridge.bd_addr.upper() != peer_addr.upper():
         continue
-      if p_bridge.h4_client is not None:
-        for handle in list(p_bridge.connected_handles.keys()):
-          try:
-            p_bridge.h4_client.send_command(
-                0x0406, struct.pack('<HB', handle, 0x13), timeout=1.0
-            )
-          except Exception as exc:
-            logger.debug(
-                'Failed sending HCI Disconnect on peer bridge for handle 0x%04X: %s',
-                handle,
-                exc,
-            )
-      p_bridge.connected_handles.clear()
+      self._disconnect_bridge_handles(p_bridge)
       self._close_peripheral_fds(p_cid)
       periph_dev = f'/org/bluez/{p_cid}/dev_{bridge.bd_addr.replace(":", "_")}'
       self._emit_all(
           periph_dev,
           'org.freedesktop.DBus.Properties',
           'PropertiesChanged',
-          GLib.Variant(
-              '(sa{sv}as)',
-              (
-                  'org.bluez.Device1',
-                  {'Connected': GLib.Variant('b', False)},
-                  [],
-              ),
-          ),
+          disconnected_props,
       )
     self._emit_all(
         object_path,
         'org.freedesktop.DBus.Properties',
         'PropertiesChanged',
-        GLib.Variant(
-            '(sa{sv}as)',
-            ('org.bluez.Device1', {'Connected': GLib.Variant('b', False)}, []),
-        ),
+        disconnected_props,
     )
     if invocation is not None:
       invocation.return_value(None)
@@ -475,25 +493,10 @@ class BluezGattPeripheralMixin:
       invocation.return_value(None)
       if bridge.connected_handles:
         peer_addr = next(iter(bridge.connected_handles.values()))
-
-        def _start_notify_worker():
-          time.sleep(0.05)
-          for p_cid, p_bridge in list(
-              self.docker_manager.adapter_bridges.items()
-          ):
-            if p_bridge.bd_addr.upper() == peer_addr.upper():
-              c2_info = p_bridge.att_server.database.find_characteristic_by_uuid(
-                  '18ee2ef5-263d-4559-959f-4f9c429f9d12'
-              )
-              if c2_info is not None:
-                cccd_h = p_bridge.att_server.database.find_cccd_for_char(
-                    c2_info[1]
-                )
-                if cccd_h is not None:
-                  p_bridge.att_server.cccd_states[cccd_h] = 0x0002
-              if p_cid in self._get_c1_written_set():
-                self._acquire_peripheral_c2_notify(p_cid, bridge.bd_addr)
-
-        threading.Thread(target=_start_notify_worker, daemon=True).start()
+        threading.Thread(
+            target=self._notify_peripheral_c2_subscribers,
+            args=(bridge, peer_addr),
+            daemon=True,
+        ).start()
       return
     invocation.return_value(None)

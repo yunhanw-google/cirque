@@ -387,19 +387,17 @@ class TestRealChipBleWiFiE2E(unittest.TestCase):
     self.assertEqual(dev_ip, '')
 
     # Assert zero operational UDP 5540 frames relayed over Wi-Fi
+    self._assert_zero_relayed_udp5540(wifi_before, wifi_after)
+
+  def _assert_zero_relayed_udp5540(self, wifi_before: dict, wifi_after: dict):
+    """Asserts that zero Matter UDP/5540 frames were relayed over Wi-Fi."""
     dev_node = self.home.devices.get(self.device_id)
-    wifi_cap = (
-        next(
-            (
-                c
-                for c in dev_node.capabilities
-                if getattr(c, 'name', '') == 'WiFi'
-            ),
-            None,
-        )
-        if dev_node
-        else None
-    )
+    wifi_cap = None
+    if dev_node:
+      for cap in dev_node.capabilities:
+        if getattr(cap, 'name', '') == 'WiFi':
+          wifi_cap = cap
+          break
     dev_st_id = getattr(wifi_cap, 'station_id', None)
     dev_5540 = 0
     if dev_st_id:
@@ -475,38 +473,7 @@ class TestRealChipBleWiFiE2E(unittest.TestCase):
     self.assertEqual(dev_ip, '')
 
     # Assert zero operational UDP 5540 frames relayed over Wi-Fi
-    dev_node = self.home.devices.get(self.device_id)
-    wifi_cap = (
-        next(
-            (
-                c
-                for c in dev_node.capabilities
-                if getattr(c, 'name', '') == 'WiFi'
-            ),
-            None,
-        )
-        if dev_node
-        else None
-    )
-    dev_st_id = getattr(wifi_cap, 'station_id', None)
-    dev_5540 = 0
-    if dev_st_id:
-      dev_5540 = wifi_after.get('stations', {}).get(dev_st_id, {}).get(
-          'relayed_udp5540_frames', 0
-      ) - wifi_before.get('stations', {}).get(dev_st_id, {}).get(
-          'relayed_udp5540_frames', 0
-      )
-    self.assertEqual(
-        dev_5540,
-        0,
-        f'Expected 0 relayed udp5540 frames from device: {dev_5540}',
-    )
-    total_5540 = wifi_after.get('relayed_udp5540_frames', 0) - wifi_before.get(
-        'relayed_udp5540_frames', 0
-    )
-    self.assertEqual(
-        total_5540, 0, f'Expected 0 total relayed udp5540 frames: {total_5540}'
-    )
+    self._assert_zero_relayed_udp5540(wifi_before, wifi_after)
 
   def test_04_real_chip_negative_control_ble_relay_disabled(self):
     from cirque.capabilities.bluetoothcapability import BlueToothCapability
@@ -563,38 +530,7 @@ class TestRealChipBleWiFiE2E(unittest.TestCase):
     )
 
     # Assert zero operational UDP 5540 frames relayed over Wi-Fi
-    dev_node = self.home.devices.get(self.device_id)
-    wifi_cap = (
-        next(
-            (
-                c
-                for c in dev_node.capabilities
-                if getattr(c, 'name', '') == 'WiFi'
-            ),
-            None,
-        )
-        if dev_node
-        else None
-    )
-    dev_st_id = getattr(wifi_cap, 'station_id', None)
-    dev_5540 = 0
-    if dev_st_id:
-      dev_5540 = wifi_after.get('stations', {}).get(dev_st_id, {}).get(
-          'relayed_udp5540_frames', 0
-      ) - wifi_before.get('stations', {}).get(dev_st_id, {}).get(
-          'relayed_udp5540_frames', 0
-      )
-    self.assertEqual(
-        dev_5540,
-        0,
-        f'Expected 0 relayed udp5540 frames from device: {dev_5540}',
-    )
-    total_5540 = wifi_after.get('relayed_udp5540_frames', 0) - wifi_before.get(
-        'relayed_udp5540_frames', 0
-    )
-    self.assertEqual(
-        total_5540, 0, f'Expected 0 total relayed udp5540 frames: {total_5540}'
-    )
+    self._assert_zero_relayed_udp5540(wifi_before, wifi_after)
 
   def test_05_mutation_check_print_only_standin_fails(self):
     from unittest.mock import patch

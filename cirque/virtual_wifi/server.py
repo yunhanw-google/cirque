@@ -1031,8 +1031,8 @@ class VirtualWiFiServer:
     for w in writers_to_record:
       try:
         w.write_frame(fixed_frame)
-      except Exception:
-        pass
+      except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.debug('PCAP write_frame failed: %s', exc)
 
     for peer_sock in target_socks:
       send_lock = self._get_socket_send_lock(peer_sock)

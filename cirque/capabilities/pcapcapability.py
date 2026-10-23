@@ -265,15 +265,10 @@ def build_le_ll_phdr_frame(
 
   if pdu_type in ('ADV_IND', 'ADV_NONCONN_IND', 'SCAN_RSP', 'ADV_SCAN_IND'):
     pdu_payload = src_bytes + payload
-  elif pdu_type == 'SCAN_REQ':
-    pdu_payload = src_bytes + dst_bytes
-  elif pdu_type == 'ADV_DIRECT_IND':
+  elif pdu_type in ('SCAN_REQ', 'ADV_DIRECT_IND'):
     pdu_payload = src_bytes + dst_bytes
   elif pdu_type == 'CONNECT_IND':
-    if len(payload) >= 22:
-      conn_params = payload[:22]
-    else:
-      conn_params = payload + b'\x00' * (22 - len(payload))
+    conn_params = (payload + b'\x00' * 22)[:22]
     pdu_payload = src_bytes + dst_bytes + conn_params
   else:
     pdu_payload = payload
@@ -723,6 +718,10 @@ class ThreadRadioSniffer:
     )
 
 
+_PCAP_WRITERS_LOCK = threading.Lock()
+_GLOBAL_PCAP_WRITERS: Dict[str, PcapWriter] = {}
+
+
 class PcapCapability(BaseCapability):
   """Cirque packet capture capability managing per-node and shared PCAP files.
 
@@ -734,9 +733,6 @@ class PcapCapability(BaseCapability):
     }
   Or globally via the `CIRQUE_PCAP_DIR` environment variable.
   """
-
-  _WRITERS_LOCK = threading.Lock()
-  _GLOBAL_WRITERS: Dict[str, PcapWriter] = {}
 
   def __init__(
       self,
@@ -784,20 +780,20 @@ class PcapCapability(BaseCapability):
   ) -> PcapWriter:
     """Thread-safe registry returning a singleton PcapWriter per target file."""
     path = os.path.join(pcap_dir, filename)
-    with cls._WRITERS_LOCK:
-      cached = cls._GLOBAL_WRITERS.get(path)
+    with _PCAP_WRITERS_LOCK:
+      cached = _GLOBAL_PCAP_WRITERS.get(path)
       if cached is None or cached._file.closed:
         cached = PcapWriter(path, dlt=dlt)
-        cls._GLOBAL_WRITERS[path] = cached
+        _GLOBAL_PCAP_WRITERS[path] = cached
       return cached
 
   @classmethod
   def close_all_writers(cls) -> None:
     """Closes all globally registered PcapWriter instances."""
-    with cls._WRITERS_LOCK:
-      for writer in list(cls._GLOBAL_WRITERS.values()):
+    with _PCAP_WRITERS_LOCK:
+      for writer in list(_GLOBAL_PCAP_WRITERS.values()):
         writer.close()
-      cls._GLOBAL_WRITERS.clear()
+      _GLOBAL_PCAP_WRITERS.clear()
 
   def enable_capability(self, docker_node) -> None:
     """Enables packet capture hooks for a Cirque Docker node."""

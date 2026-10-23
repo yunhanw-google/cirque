@@ -138,6 +138,57 @@ static void sig_handler(int sig) {
     g_running = 0;
 }
 
+/* Writes `n` bytes from `buf` to the TCP socket `sock_fd`. */
+static void write_all_to_tcp(int sock_fd, const uint8_t *buf, ssize_t n) {
+    ssize_t sent = 0;
+    while (g_running && sent < n) {
+        ssize_t s = write(sock_fd, buf + sent, n - sent);
+        if (s > 0) {
+            sent += s;
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            usleep(1000);
+            continue;
+        }
+        perror("write to tcp");
+        g_running = 0;
+        break;
+    }
+}
+
+/* Writes `n` bytes from `buf` to the PTY master `master_fd` with bounded EIO
+ * retry while the Android Bluetooth HAL slave fd is re-opening. */
+static void write_all_to_pty(int master_fd, const uint8_t *buf, ssize_t n) {
+    ssize_t sent = 0;
+    int eio_retries = 0;
+    while (g_running && sent < n) {
+        ssize_t s = write(master_fd, buf + sent, n - sent);
+        if (s > 0) {
+            sent += s;
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            usleep(1000);
+            continue;
+        }
+        if (errno == EIO) {
+            if (++eio_retries > MAX_EIO_RETRIES) {
+                fprintf(stderr,
+                        "[pty_bridge] EIO retry limit reached writing to PTY "
+                        "(%d retries), dropping frame\n",
+                        MAX_EIO_RETRIES);
+                break;
+            }
+            usleep(1000);
+            continue;
+        }
+        perror("write to pty");
+        g_running = 0;
+        break;
+    }
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 4) {
         fprintf(
@@ -296,20 +347,7 @@ int main(int argc, char *argv[]) {
             ssize_t n = read(master_fd, buf, sizeof(buf));
             if (n > 0) {
                 total_pty_to_tcp += n;
-                ssize_t sent = 0;
-                while (g_running && sent < n) {
-                    ssize_t s = write(sock_fd, buf + sent, n - sent);
-                    if (s <= 0) {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                            usleep(1000);
-                            continue;
-                        }
-                        perror("write to tcp");
-                        g_running = 0;
-                        break;
-                    }
-                    sent += s;
-                }
+                write_all_to_tcp(sock_fd, buf, n);
             } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
                        errno != EIO) {
                 perror("read pty");
@@ -331,31 +369,7 @@ int main(int argc, char *argv[]) {
             ssize_t n = read(sock_fd, buf, sizeof(buf));
             if (n > 0) {
                 total_tcp_to_pty += n;
-                ssize_t sent = 0;
-                int eio_retries = 0;
-                while (g_running && sent < n) {
-                    ssize_t s = write(master_fd, buf + sent, n - sent);
-                    if (s <= 0) {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                            usleep(1000);
-                            continue;
-                        }
-                        if (errno == EIO) {
-                            if (++eio_retries > MAX_EIO_RETRIES) {
-                                fprintf(stderr,
-                                        "[pty_bridge] EIO retry limit reached writing to PTY (%d retries), dropping frame\n",
-                                        MAX_EIO_RETRIES);
-                                break;
-                            }
-                            usleep(1000);
-                            continue;
-                        }
-                        perror("write to pty");
-                        g_running = 0;
-                        break;
-                    }
-                    sent += s;
-                }
+                write_all_to_pty(master_fd, buf, n);
             } else if (n == 0) {
                 printf("[pty_bridge] TCP peer closed connection.\n");
                 break;

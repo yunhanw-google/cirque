@@ -802,8 +802,8 @@ class CirqueMcpServer:
       if hasattr(dev, 'get_docker_ip'):
         try:
           ipv4 = dev.get_docker_ip()
-        except Exception:  # pylint: disable=broad-exception-caught
-          pass
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+          logger.debug('Could not resolve Docker IP for %s: %s', dev_id, exc)
       devices[dev_id] = {
           'id': dev_id,
           'name': getattr(dev, 'name', dev_id),

@@ -75,7 +75,7 @@ import re
 import struct
 import sys
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Union
 
 from cirque.pcap.matter_session import (
     BTP_FLAG_BEGIN,
@@ -170,6 +170,13 @@ def _format_hex_ascii_dump(data_bytes: bytes) -> str:
 # -----------------------------------------------------------------------------
 
 
+def _unpack_att_handle(l2cap_sdu: bytes) -> int:
+  """Extracts the 2-byte little-endian ATT handle from an L2CAP SDU."""
+  if len(l2cap_sdu) >= 3:
+    return struct.unpack('<H', l2cap_sdu[1:3])[0]
+  return 0
+
+
 def dissect_hci_phdr_packet(
     ts: float, raw_data: bytes, pcap_name: str, index: int
 ) -> Optional[FlowEvent]:
@@ -241,11 +248,7 @@ def dissect_hci_phdr_packet(
           encap.append(f'ATT (0x{att_opcode:02x})')
 
           if att_opcode in (0x12, 0x52):  # Write Req / Write Cmd
-            handle = (
-                struct.unpack('<H', l2cap_sdu[1:3])[0]
-                if len(l2cap_sdu) >= 3
-                else 0
-            )
+            handle = _unpack_att_handle(l2cap_sdu)
             title = f'ATT Write (Handle 0x{handle:04x})'
             summary = f'ATT Write Request to handle 0x{handle:04x}'
             stage = 'GATT_CONNECT'
@@ -256,11 +259,7 @@ def dissect_hci_phdr_packet(
             summary = 'ATT Write Response acknowledgment'
             stage = 'GATT_CONNECT'
           elif att_opcode in (0x1D, 0x1B):  # Handle Value Indication/Notification
-            handle = (
-                struct.unpack('<H', l2cap_sdu[1:3])[0]
-                if len(l2cap_sdu) >= 3
-                else 0
-            )
+            handle = _unpack_att_handle(l2cap_sdu)
             title = f'ATT Indication/Notify (0x{handle:04x})'
             summary = f'ATT Handle Value on 0x{handle:04x}'
             stage = 'GATT_CONNECT'
@@ -439,6 +438,36 @@ _DHCP_MESSAGE_TYPES = {
 }
 
 
+class _DhcpSummary(NamedTuple):
+  xid: int
+  yiaddr: str
+  msg_type: str
+
+
+def _parse_dhcp_options(udp_payload: bytes) -> Optional[_DhcpSummary]:
+  """Parses a BOOTP/DHCP payload (236-byte header + magic cookie + options)."""
+  if len(udp_payload) < 240:
+    return None
+  xid = struct.unpack('>I', udp_payload[4:8])[0]
+  yiaddr = '.'.join(str(b) for b in udp_payload[16:20])
+  magic = struct.unpack('>I', udp_payload[236:240])[0]
+  msg_type = 'Message'
+  idx = 240
+  while magic == _DHCP_MAGIC_COOKIE and idx + 1 < len(udp_payload):
+    opt = udp_payload[idx]
+    if opt == 255:  # End
+      break
+    if opt == 0:  # Pad
+      idx += 1
+      continue
+    opt_len = udp_payload[idx + 1]
+    if opt == 53 and opt_len == 1 and idx + 2 < len(udp_payload):
+      code = udp_payload[idx + 2]
+      msg_type = _DHCP_MESSAGE_TYPES.get(code, f'Type {code}')
+    idx += 2 + opt_len
+  return _DhcpSummary(xid=xid, yiaddr=yiaddr, msg_type=msg_type)
+
+
 def dissect_wifi_packet(
     ts: float, raw_data: bytes, pcap_name: str, index: int
 ) -> Optional[FlowEvent]:
@@ -517,32 +546,16 @@ def dissect_wifi_packet(
               if dst_mac == 'FF:FF:FF:FF:FF:FF' and dst_port == 67
               else dst_mac
           )
-          udp_payload = l3_payload[28:]
-          # BOOTP fixed header (236 bytes) + magic cookie, then options.
-          if len(udp_payload) >= 240:
-            xid = struct.unpack('>I', udp_payload[4:8])[0]
-            yiaddr = '.'.join(str(b) for b in udp_payload[16:20])
-            magic = struct.unpack('>I', udp_payload[236:240])[0]
-            msg_type = 'Message'
-            idx = 240
-            while magic == _DHCP_MAGIC_COOKIE and idx + 1 < len(udp_payload):
-              opt = udp_payload[idx]
-              if opt == 255:  # End
-                break
-              if opt == 0:  # Pad
-                idx += 1
-                continue
-              opt_len = udp_payload[idx + 1]
-              if opt == 53 and opt_len == 1 and idx + 2 < len(udp_payload):
-                code = udp_payload[idx + 2]
-                msg_type = _DHCP_MESSAGE_TYPES.get(code, f'Type {code}')
-              idx += 2 + opt_len
-            title = f'DHCP {msg_type}'
-            summary = f'{title} xid=0x{xid:08x} yiaddr={yiaddr}'
-            encap.append(f'DHCP ({msg_type})')
-            details['dhcp_message_type'] = msg_type
-            details['dhcp_xid'] = f'0x{xid:08x}'
-            details['dhcp_yiaddr'] = yiaddr
+          dhcp_info = _parse_dhcp_options(l3_payload[28:])
+          if dhcp_info is not None:
+            title = f'DHCP {dhcp_info.msg_type}'
+            summary = (
+                f'{title} xid=0x{dhcp_info.xid:08x} yiaddr={dhcp_info.yiaddr}'
+            )
+            encap.append(f'DHCP ({dhcp_info.msg_type})')
+            details['dhcp_message_type'] = dhcp_info.msg_type
+            details['dhcp_xid'] = f'0x{dhcp_info.xid:08x}'
+            details['dhcp_yiaddr'] = dhcp_info.yiaddr
   elif ethertype == 0x86DD:  # IPv6
     sublayer = 'IPv6'
     encap.append('IPv6')
@@ -1630,18 +1643,26 @@ def _logcat_timestamp(fields: Tuple[str, ...], ref_ts: float) -> float:
   return ts + msec / 1000.0
 
 
+class _ChipLogLine(NamedTuple):
+  timestamp: float
+  tag: str
+  body: str
+
+
 def _match_chip_line(
     line: str, ref_ts: float
-) -> Optional[Tuple[float, str, str]]:
+) -> Optional[_ChipLogLine]:
   """Returns (timestamp, tag, body) of a POSIX CHIP or Android logcat line."""
   m_chip = _CHIP_LINE_RE.match(line)
   if m_chip:
     ts_str, tag_bracket, tag_colon, body = m_chip.groups()
-    return float(ts_str), tag_bracket or tag_colon, body
+    return _ChipLogLine(float(ts_str), tag_bracket or tag_colon, body)
   m_logcat = _LOGCAT_LINE_RE.match(line)
   if m_logcat:
     groups = m_logcat.groups()
-    return _logcat_timestamp(groups[:6], ref_ts), groups[6], groups[7]
+    return _ChipLogLine(
+        _logcat_timestamp(groups[:6], ref_ts), groups[6], groups[7]
+    )
   return None
 
 
@@ -1695,8 +1716,410 @@ def _coerce_flow_event(item: Union[FlowEvent, Dict[str, Any]], idx: int = 0) -> 
   return None
 
 
+def _dissect_otbr_log_line(
+    m_otbr: re.Match,
+    otbr_base_ts: float,
+    fname: str,
+    line_no: int,
+    node_name: str,
+) -> Optional[FlowEvent]:
+  """Extracts a FlowEvent from an OpenThread / otbr-agent log line."""
+  hh, mm, ss, ms, _, comp, msg, _, note_comp, note_msg = m_otbr.groups()
+  if hh is not None:
+    rel_sec = int(hh) * 3600 + int(mm) * 60 + int(ss) + int(ms) / 1000.0
+    ts = otbr_base_ts + rel_sec
+    comp_clean = comp.strip('- ')
+    body = msg.strip()
+  else:
+    ts = otbr_base_ts
+    comp_clean = (note_comp or 'AGENT').strip('- ')
+    body = (note_msg or '').strip()
+
+  if comp_clean == 'Mle' and (
+      'Role ' in body
+      or 'AttachState ' in body
+      or 'Send Advertisement' in body
+      or 'Send Data Response' in body
+  ):
+    title = (
+        f'Thread MLE {body.split("(")[0].strip()}'
+        if 'Send ' in body
+        else f'Thread MLE {body}'
+    )
+    return FlowEvent(
+        event_id=f'otbr_{fname}_{line_no}_{int(ts * 1000)}',
+        timestamp=ts,
+        layer='THREAD',
+        sublayer='MLE',
+        stage='NETWORK_CONFIG',
+        src=node_name,
+        dst='ThreadMesh',
+        title=title[:80],
+        summary=f'{node_name}: {body}',
+        details={
+            'log_file': fname,
+            'line_number': line_no,
+            'component': comp_clean,
+            'node': node_name,
+        },
+        encapsulation=['IEEE 802.15.4', '6LoWPAN', 'Thread MLE'],
+    )
+  if comp_clean == 'MeshForwarder' and (
+      'Sent IPv6' in body or 'Received IPv6' in body
+  ):
+    is_tx = body.startswith('Sent ')
+    peer_match = re.search(r'(?:to|from):(0x[0-9a-fA-F]+)', body)
+    peer = peer_match.group(1) if peer_match else 'ThreadMesh'
+    len_match = re.search(r'len:(\d+)', body)
+    pkt_len = int(len_match.group(1)) if len_match else 0
+    direction = 'TX' if is_tx else 'RX'
+    return FlowEvent(
+        event_id=f'otbr_{fname}_{line_no}_{int(ts * 1000)}',
+        timestamp=ts,
+        layer='THREAD',
+        sublayer='6LoWPAN',
+        stage='NETWORK_CONFIG',
+        src=node_name if is_tx else peer,
+        dst=peer if is_tx else node_name,
+        title=f'Thread IPv6 UDP {direction} ({pkt_len}B)',
+        summary=f'{node_name}: {body}',
+        details={
+            'log_file': fname,
+            'line_number': line_no,
+            'component': comp_clean,
+            'direction': direction,
+            'length': pkt_len,
+        },
+        encapsulation=['IEEE 802.15.4', '6LoWPAN', 'IPv6 UDP'],
+    )
+  if comp_clean in (
+      'DatasetManager',
+      'Settings',
+      'BorderAgent',
+      'BorderRouting',
+      'Nat64',
+      'NetworkData',
+      'TrelDiscoverer',
+  ) and any(
+      kw in body
+      for kw in (
+          'Active dataset set',
+          'Saved ActiveDataset',
+          'Registering service',
+          'Local on-link prefix:',
+          'State: NotRunning -> Active',
+          'Received ServerData',
+          'DNS-SD service registered',
+      )
+  ):
+    return FlowEvent(
+        event_id=f'otbr_{fname}_{line_no}_{int(ts * 1000)}',
+        timestamp=ts,
+        layer='THREAD',
+        sublayer=comp_clean,
+        stage='NETWORK_CONFIG',
+        src=node_name,
+        dst='ThreadMesh',
+        title=f'{comp_clean}: {body[:64]}',
+        summary=f'{node_name} [{comp_clean}] {body}',
+        details={
+            'log_file': fname,
+            'line_number': line_no,
+            'component': comp_clean,
+            'node': node_name,
+        },
+        encapsulation=['Thread Border Router', comp_clean],
+    )
+  return None
+
+
+def _dissect_chip_em_line(
+    m_em: re.Match,
+    ts: float,
+    tag: str,
+    body: str,
+    fname: str,
+    line_no: int,
+    node_name: str,
+) -> FlowEvent:
+  """Extracts a FlowEvent from a CHIP ExchangeManager [EM] line."""
+  (
+      _,
+      exch_id,
+      sess_id,
+      msg_cnt,
+      ack_cnt,
+      sec_flag,
+      direction,
+      peer_from,
+      peer_to,
+      transport_hint,
+      transport_addr,
+      type_code,
+      proto_name,
+      msg_name,
+      byte_len,
+  ) = m_em.groups()
+  is_ble = transport_hint == 'BLE' or 'BLE' in body
+  layer = 'BT' if is_ble else 'WIFI'
+  peer_addr, peer_port = _split_transport_addr(transport_addr)
+  src = peer_from if direction == 'RX' else node_name
+  dst = node_name if direction == 'RX' else peer_to
+  if peer_addr:
+    if direction == 'RX':
+      src = peer_addr
+    else:
+      dst = peer_addr
+  details = {
+      'log_file': fname,
+      'line_number': line_no,
+      'chip_tag': tag,
+      'node': node_name,
+      'exchange_id': exch_id,
+      'session_id': sess_id or '0',
+      'message_counter': msg_cnt or '',
+      'session_type': sec_flag,
+      'direction': direction,
+      'peer_from': peer_from,
+      'peer_to': peer_to,
+      'type_code': type_code,
+      'matter_protocol': proto_name,
+      'matter_msg_type': msg_name,
+      'transport': 'BLE' if is_ble else 'IP',
+      'bytes': int(byte_len or 0),
+  }
+  if ack_cnt:
+    details['ack_counter'] = ack_cnt
+  if peer_addr:
+    details['peer_addr'] = peer_addr
+    details['peer_port'] = peer_port
+  m_exch = re.match(r'\d+', exch_id)
+  if msg_cnt and m_exch:
+    proto_id, opcode = (int(v, 16) for v in type_code.split(':'))
+    details['matter_msg_key'] = matter_message_key(
+        int(msg_cnt), int(m_exch.group(0)), proto_id, opcode
+    )
+  return FlowEvent(
+      event_id=f'chip_em_{fname}_{line_no}_{int(ts * 1000)}',
+      timestamp=ts,
+      layer=layer,
+      sublayer=proto_name,
+      stage='GATT_CONNECT' if is_ble else 'NETWORK_CONFIG',
+      src=src,
+      dst=dst,
+      title=f'{proto_name}:{msg_name} ({direction})',
+      summary=f'{node_name} {body}',
+      details=details,
+      encapsulation=[
+          'BLE BTP' if is_ble else 'IPv6/UDP',
+          f'Exchange {exch_id}',
+          f'{proto_name}:{msg_name}',
+      ],
+  )
+
+
+def _dissect_chip_log_line(
+    chip_line: _ChipLogLine,
+    fname: str,
+    line_no: int,
+    node_name: str,
+) -> Optional[FlowEvent]:
+  """Extracts a FlowEvent from a parsed CHIP/Matter SDK log line."""
+  ts, tag, body = chip_line
+  m_em = _EM_EXCHANGE_RE.search(body) if tag == 'EM' else None
+  if m_em:
+    return _dissect_chip_em_line(
+        m_em, ts, tag, body, fname, line_no, node_name
+    )
+  if tag in ('DMG', 'CTL') and (
+      _DMG_COMMAND_RE.search(body) or _CTL_STEP_RE.search(body)
+  ):
+    m_dmg = _DMG_COMMAND_RE.search(body)
+    if m_dmg:
+      endpoint = int(m_dmg.group(1))
+      ids = tuple(int(g.replace('_', ''), 16) for g in m_dmg.group(2, 3))
+      direction, src, dst = 'RX', 'Controller', node_name
+      step = None
+    else:
+      step = _CTL_STEP_RE.search(body).group(1)
+      ids = COMMISSIONING_STEP_COMMANDS.get(step)
+      endpoint = 0
+      direction, src, dst = 'TX', node_name, 'Device'
+    if ids is None:
+      return None
+    cluster, command = COMMISSIONING_COMMANDS.get(
+        ids, (f'Cluster 0x{ids[0]:04x}', f'Command 0x{ids[1]:02x}')
+    )
+    details = {
+        'log_file': fname,
+        'line_number': line_no,
+        'chip_tag': tag,
+        'node': node_name,
+        'direction': direction,
+        'endpoint': endpoint,
+        'cluster_id': f'0x{ids[0]:04x}',
+        'command_id': f'0x{ids[1]:02x}',
+        'matter_cluster': cluster,
+        'matter_command': command,
+        'evidence': 'controller_intent' if step else 'device_log',
+    }
+    if step:
+      details['commissioning_step'] = step
+    return FlowEvent(
+        event_id=f'chip_cmd_{fname}_{line_no}_{int(ts * 1000)}',
+        timestamp=ts,
+        layer='GENERAL',
+        sublayer='IM',
+        stage='NETWORK_CONFIG',
+        src=src,
+        dst=dst,
+        title=f'{cluster}:{command} ({direction})',
+        summary=f'{node_name} [{tag}] {body}',
+        details=details,
+        encapsulation=['Interaction Model', f'{cluster}:{command}'],
+    )
+  if tag in ('BLE', 'DL') and any(
+      kw in body
+      for kw in (
+          'BLE advertisement started',
+          'New BLE connection',
+          'CHIPoBLE subscribe received',
+          'Receive kCHIPoBLEConnectionEstablished',
+          'Write request received',
+          'Indication confirmation',
+          'CHIPoBLE advertising stopped',
+          'GATT application registered',
+          'wpa_supplicant: Start WiFi management',
+          'wpa_supplicant: connected to interface proxy',
+      )
+  ):
+    is_wifi = 'wpa_supplicant' in body
+    is_gatt = any(
+        kw in body for kw in ('GATT', 'Write', 'Indication', 'subscribe')
+    )
+    sublayer = 'WPA' if is_wifi else ('GATT' if is_gatt else 'BLE_LL')
+    stage = (
+        'NETWORK_CONFIG'
+        if is_wifi
+        else (
+            'ADV_DISCOVERY'
+            if 'advertisement' in body.lower()
+            else 'GATT_CONNECT'
+        )
+    )
+    return FlowEvent(
+        event_id=f'chip_dl_{fname}_{line_no}_{int(ts * 1000)}',
+        timestamp=ts,
+        layer='WIFI' if is_wifi else 'BT',
+        sublayer=sublayer,
+        stage=stage,
+        src=node_name,
+        dst='WiFiMedium' if is_wifi else 'BLEPeer',
+        title=f'{tag}: {body[:68]}',
+        summary=f'{node_name} [{tag}] {body}',
+        details={
+            'log_file': fname,
+            'line_number': line_no,
+            'chip_tag': tag,
+            'node': node_name,
+        },
+        encapsulation=['Wi-Fi WPA2' if is_wifi else 'BLE GATT/LL', tag],
+    )
+  if tag == 'DIS' and any(
+      kw in body
+      for kw in (
+          'mDNS service published:',
+          'Updating services using commissioning mode',
+          'Commission SRV for instance',
+          'IP address ',
+      )
+  ):
+    return FlowEvent(
+        event_id=f'chip_dis_{fname}_{line_no}_{int(ts * 1000)}',
+        timestamp=ts,
+        layer='WIFI',
+        sublayer='mDNS',
+        stage='NETWORK_CONFIG',
+        src=node_name,
+        dst='mDNSMulticast',
+        title=f'mDNS: {body[:68]}',
+        summary=f'{node_name} [DIS] {body}',
+        details={
+            'log_file': fname,
+            'line_number': line_no,
+            'chip_tag': tag,
+            'node': node_name,
+        },
+        encapsulation=['IPv6 UDP :5353', 'mDNS / DNS-SD'],
+    )
+  if tag in ('SC', 'PAS', 'CAS', 'IN', 'SVR') and any(
+      kw in body
+      for kw in (
+          'Received PBKDF param request',
+          'Sent PBKDF param response',
+          'Received spake2p msg',
+          'Sent spake2p msg',
+          "State change 'kEstablishing' --> 'kActive'",
+          'New secure session activated',
+          'Waiting for Sigma1 msg',
+          'Received Sigma',
+          'Sent Sigma',
+          'Commissioning session establishment step started',
+          'Commissioning completed session establishment step',
+          'Device completed Rendezvous process',
+          'Server Listening...',
+      )
+  ):
+    peer = 'Device' if _is_controller_name(node_name) else 'Controller'
+    inbound = body.startswith(('Received', 'Waiting'))
+    return FlowEvent(
+        event_id=f'chip_sc_{fname}_{line_no}_{int(ts * 1000)}',
+        timestamp=ts,
+        layer='GENERAL',
+        sublayer=tag,
+        stage='NETWORK_CONFIG',
+        src=peer if inbound else node_name,
+        dst=node_name if inbound else peer,
+        title=f'{tag}: {body[:68]}',
+        summary=f'{node_name} [{tag}] {body}',
+        details={
+            'log_file': fname,
+            'line_number': line_no,
+            'chip_tag': tag,
+            'node': node_name,
+        },
+        encapsulation=['Secure Session', tag],
+    )
+  return None
+
+
+def _backfill_exchange_peers(events: List[FlowEvent]) -> None:
+  """Backfills missing RX/TX peer addresses from matching exchange lines."""
+  exchange_peers: Dict[str, str] = {}
+  for ev in events:
+    if ev.details.get('chip_tag') == 'EM' and ev.details.get('peer_addr'):
+      exchange_peers.setdefault(
+          ev.details['exchange_id'], ev.details['peer_addr']
+      )
+  for ev in events:
+    details = ev.details
+    peer = exchange_peers.get(details.get('exchange_id', ''))
+    if (
+        details.get('chip_tag') == 'EM'
+        and details.get('transport') == 'IP'
+        and not details.get('peer_addr')
+        and peer
+    ):
+      details['peer_addr'] = peer
+      details['peer_addr_from_exchange'] = True
+      if details['direction'] == 'RX':
+        ev.src = peer
+      else:
+        ev.dst = peer
+
+
 def dissect_log_file(log_path: str) -> List[FlowEvent]:
-  """Extracts cross-layer protocol milestones from a Cirque container/device .log file."""
+  """Extracts cross-layer protocol milestones from a Cirque device .log file."""
   events: List[FlowEvent] = []
   if not os.path.isfile(log_path):
     return events
@@ -1729,7 +2152,6 @@ def dissect_log_file(log_path: str) -> List[FlowEvent]:
     if not clean:
       continue
 
-    # 1. Cirque Helper timestamped command execution lines
     m_helper = _HELPER_TS_RE.match(clean)
     if m_helper:
       dt_str, ms_str, _, _, msg = m_helper.groups()
@@ -1764,387 +2186,24 @@ def dissect_log_file(log_path: str) -> List[FlowEvent]:
         )
       continue
 
-    # 2. OpenThread Border Router / Thread Node (otbr-agent) lines
     m_otbr = _OTBR_LINE_RE.match(clean)
     if m_otbr:
-      hh, mm, ss, ms, _, comp, msg, note_lvl, note_comp, note_msg = (
-          m_otbr.groups()
+      otbr_event = _dissect_otbr_log_line(
+          m_otbr, otbr_base_ts, fname, line_no, node_name
       )
-      if hh is not None:
-        rel_sec = (
-            int(hh) * 3600 + int(mm) * 60 + int(ss) + int(ms) / 1000.0
-        )
-        ts = otbr_base_ts + rel_sec
-        comp_clean = comp.strip('- ')
-        body = msg.strip()
-      else:
-        ts = otbr_base_ts
-        comp_clean = (note_comp or 'AGENT').strip('- ')
-        body = (note_msg or '').strip()
-
-      if comp_clean == 'Mle' and (
-          'Role ' in body
-          or 'AttachState ' in body
-          or 'Send Advertisement' in body
-          or 'Send Data Response' in body
-      ):
-        title = (
-            f'Thread MLE {body.split("(")[0].strip()}'
-            if 'Send ' in body
-            else f'Thread MLE {body}'
-        )
-        events.append(
-            FlowEvent(
-                event_id=f'otbr_{fname}_{line_no}_{int(ts * 1000)}',
-                timestamp=ts,
-                layer='THREAD',
-                sublayer='MLE',
-                stage='NETWORK_CONFIG',
-                src=node_name,
-                dst='ThreadMesh',
-                title=title[:80],
-                summary=f'{node_name}: {body}',
-                details={
-                    'log_file': fname,
-                    'line_number': line_no,
-                    'component': comp_clean,
-                    'node': node_name,
-                },
-                encapsulation=['IEEE 802.15.4', '6LoWPAN', 'Thread MLE'],
-            )
-        )
-      elif comp_clean == 'MeshForwarder' and (
-          'Sent IPv6' in body or 'Received IPv6' in body
-      ):
-        is_tx = body.startswith('Sent ')
-        peer_match = re.search(r'(?:to|from):(0x[0-9a-fA-F]+)', body)
-        peer = peer_match.group(1) if peer_match else 'ThreadMesh'
-        len_match = re.search(r'len:(\d+)', body)
-        pkt_len = int(len_match.group(1)) if len_match else 0
-        events.append(
-            FlowEvent(
-                event_id=f'otbr_{fname}_{line_no}_{int(ts * 1000)}',
-                timestamp=ts,
-                layer='THREAD',
-                sublayer='6LoWPAN',
-                stage='NETWORK_CONFIG',
-                src=node_name if is_tx else peer,
-                dst=peer if is_tx else node_name,
-                title=(
-                    f'Thread IPv6 UDP {"TX" if is_tx else "RX"} ({pkt_len}B)'
-                ),
-                summary=f'{node_name}: {body}',
-                details={
-                    'log_file': fname,
-                    'line_number': line_no,
-                    'component': comp_clean,
-                    'direction': 'TX' if is_tx else 'RX',
-                    'length': pkt_len,
-                },
-                encapsulation=['IEEE 802.15.4', '6LoWPAN', 'IPv6 UDP'],
-            )
-        )
-      elif comp_clean in (
-          'DatasetManager',
-          'Settings',
-          'BorderAgent',
-          'BorderRouting',
-          'Nat64',
-          'NetworkData',
-          'TrelDiscoverer',
-      ) and any(
-          kw in body
-          for kw in (
-              'Active dataset set',
-              'Saved ActiveDataset',
-              'Registering service',
-              'Local on-link prefix:',
-              'State: NotRunning -> Active',
-              'Received ServerData',
-              'DNS-SD service registered',
-          )
-      ):
-        events.append(
-            FlowEvent(
-                event_id=f'otbr_{fname}_{line_no}_{int(ts * 1000)}',
-                timestamp=ts,
-                layer='THREAD',
-                sublayer=comp_clean,
-                stage='NETWORK_CONFIG',
-                src=node_name,
-                dst='ThreadMesh',
-                title=f'{comp_clean}: {body[:64]}',
-                summary=f'{node_name} [{comp_clean}] {body}',
-                details={
-                    'log_file': fname,
-                    'line_number': line_no,
-                    'component': comp_clean,
-                    'node': node_name,
-                },
-                encapsulation=['Thread Border Router', comp_clean],
-            )
-        )
+      if otbr_event:
+        events.append(otbr_event)
       continue
 
-    # 3. CHIP / Matter SDK lines (POSIX '[epoch] [pid:tid] [TAG]' or logcat)
     chip_line = _match_chip_line(clean, fallback_ts)
     if chip_line:
-      ts, tag, body = chip_line
-      m_em = _EM_EXCHANGE_RE.search(body) if tag == 'EM' else None
-      if m_em:
-        (
-            _,
-            exch_id,
-            sess_id,
-            msg_cnt,
-            ack_cnt,
-            sec_flag,
-            direction,
-            peer_from,
-            peer_to,
-            transport_hint,
-            transport_addr,
-            type_code,
-            proto_name,
-            msg_name,
-            byte_len,
-        ) = m_em.groups()
-        is_ble = transport_hint == 'BLE' or 'BLE' in body
-        layer = 'BT' if is_ble else 'WIFI'
-        peer_addr, peer_port = _split_transport_addr(transport_addr)
-        src = peer_from if direction == 'RX' else node_name
-        dst = node_name if direction == 'RX' else peer_to
-        if peer_addr:
-          if direction == 'RX':
-            src = peer_addr
-          else:
-            dst = peer_addr
-        details = {
-            'log_file': fname,
-            'line_number': line_no,
-            'chip_tag': tag,
-            'node': node_name,
-            'exchange_id': exch_id,
-            'session_id': sess_id or '0',
-            'message_counter': msg_cnt or '',
-            'session_type': sec_flag,
-            'direction': direction,
-            'peer_from': peer_from,
-            'peer_to': peer_to,
-            'type_code': type_code,
-            'matter_protocol': proto_name,
-            'matter_msg_type': msg_name,
-            'transport': 'BLE' if is_ble else 'IP',
-            'bytes': int(byte_len or 0),
-        }
-        if ack_cnt:
-          details['ack_counter'] = ack_cnt
-        if peer_addr:
-          details['peer_addr'] = peer_addr
-          details['peer_port'] = peer_port
-        m_exch = re.match(r'\d+', exch_id)
-        if msg_cnt and m_exch:
-          proto_id, opcode = (int(v, 16) for v in type_code.split(':'))
-          details['matter_msg_key'] = matter_message_key(
-              int(msg_cnt), int(m_exch.group(0)), proto_id, opcode
-          )
-        events.append(
-            FlowEvent(
-                event_id=f'chip_em_{fname}_{line_no}_{int(ts * 1000)}',
-                timestamp=ts,
-                layer=layer,
-                sublayer=proto_name,
-                stage='GATT_CONNECT' if is_ble else 'NETWORK_CONFIG',
-                src=src,
-                dst=dst,
-                title=f'{proto_name}:{msg_name} ({direction})',
-                summary=f'{node_name} {body}',
-                details=details,
-                encapsulation=[
-                    'BLE BTP' if is_ble else 'IPv6/UDP',
-                    f'Exchange {exch_id}',
-                    f'{proto_name}:{msg_name}',
-                ],
-            )
-        )
-      elif tag in ('DMG', 'CTL') and (
-          _DMG_COMMAND_RE.search(body) or _CTL_STEP_RE.search(body)
-      ):
-        m_dmg = _DMG_COMMAND_RE.search(body)
-        if m_dmg:
-          endpoint = int(m_dmg.group(1))
-          ids = tuple(int(g.replace('_', ''), 16) for g in m_dmg.group(2, 3))
-          direction, src, dst = 'RX', 'Controller', node_name
-          step = None
-        else:
-          step = _CTL_STEP_RE.search(body).group(1)
-          ids = COMMISSIONING_STEP_COMMANDS.get(step)
-          endpoint = 0
-          direction, src, dst = 'TX', node_name, 'Device'
-        if ids is None:
-          continue
-        cluster, command = COMMISSIONING_COMMANDS.get(
-            ids, (f'Cluster 0x{ids[0]:04x}', f'Command 0x{ids[1]:02x}')
-        )
-        details = {
-            'log_file': fname,
-            'line_number': line_no,
-            'chip_tag': tag,
-            'node': node_name,
-            'direction': direction,
-            'endpoint': endpoint,
-            'cluster_id': f'0x{ids[0]:04x}',
-            'command_id': f'0x{ids[1]:02x}',
-            'matter_cluster': cluster,
-            'matter_command': command,
-            'evidence': 'controller_intent' if step else 'device_log',
-        }
-        if step:
-          details['commissioning_step'] = step
-        events.append(
-            FlowEvent(
-                event_id=f'chip_cmd_{fname}_{line_no}_{int(ts * 1000)}',
-                timestamp=ts,
-                layer='GENERAL',
-                sublayer='IM',
-                stage='NETWORK_CONFIG',
-                src=src,
-                dst=dst,
-                title=f'{cluster}:{command} ({direction})',
-                summary=f'{node_name} [{tag}] {body}',
-                details=details,
-                encapsulation=['Interaction Model', f'{cluster}:{command}'],
-            )
-        )
-      elif tag in ('BLE', 'DL') and any(
-          kw in body
-          for kw in (
-              'BLE advertisement started',
-              'New BLE connection',
-              'CHIPoBLE subscribe received',
-              'Receive kCHIPoBLEConnectionEstablished',
-              'Write request received',
-              'Indication confirmation',
-              'CHIPoBLE advertising stopped',
-              'GATT application registered',
-              'wpa_supplicant: Start WiFi management',
-              'wpa_supplicant: connected to interface proxy',
-          )
-      ):
-        is_wifi = 'wpa_supplicant' in body
-        events.append(
-            FlowEvent(
-                event_id=f'chip_dl_{fname}_{line_no}_{int(ts * 1000)}',
-                timestamp=ts,
-                layer='WIFI' if is_wifi else 'BT',
-                sublayer='WPA' if is_wifi else ('GATT' if 'GATT' in body or 'Write' in body or 'Indication' in body or 'subscribe' in body else 'BLE_LL'),
-                stage='NETWORK_CONFIG' if is_wifi else ('ADV_DISCOVERY' if 'advertisement' in body.lower() else 'GATT_CONNECT'),
-                src=node_name,
-                dst='WiFiMedium' if is_wifi else 'BLEPeer',
-                title=f'{tag}: {body[:68]}',
-                summary=f'{node_name} [{tag}] {body}',
-                details={
-                    'log_file': fname,
-                    'line_number': line_no,
-                    'chip_tag': tag,
-                    'node': node_name,
-                },
-                encapsulation=['Wi-Fi WPA2' if is_wifi else 'BLE GATT/LL', tag],
-            )
-        )
-      elif tag == 'DIS' and any(
-          kw in body
-          for kw in (
-              'mDNS service published:',
-              'Updating services using commissioning mode',
-              'Commission SRV for instance',
-              'IP address ',
-          )
-      ):
-        events.append(
-            FlowEvent(
-                event_id=f'chip_dis_{fname}_{line_no}_{int(ts * 1000)}',
-                timestamp=ts,
-                layer='WIFI',
-                sublayer='mDNS',
-                stage='NETWORK_CONFIG',
-                src=node_name,
-                dst='mDNSMulticast',
-                title=f'mDNS: {body[:68]}',
-                summary=f'{node_name} [DIS] {body}',
-                details={
-                    'log_file': fname,
-                    'line_number': line_no,
-                    'chip_tag': tag,
-                    'node': node_name,
-                },
-                encapsulation=['IPv6 UDP :5353', 'mDNS / DNS-SD'],
-            )
-        )
-      elif tag in ('SC', 'PAS', 'CAS', 'IN', 'SVR') and any(
-          kw in body
-          for kw in (
-              'Received PBKDF param request',
-              'Sent PBKDF param response',
-              'Received spake2p msg',
-              'Sent spake2p msg',
-              "State change 'kEstablishing' --> 'kActive'",
-              'New secure session activated',
-              'Waiting for Sigma1 msg',
-              'Received Sigma',
-              'Sent Sigma',
-              'Commissioning session establishment step started',
-              'Commissioning completed session establishment step',
-              'Device completed Rendezvous process',
-              'Server Listening...',
-          )
-      ):
-        peer = 'Device' if _is_controller_name(node_name) else 'Controller'
-        inbound = body.startswith(('Received', 'Waiting'))
-        events.append(
-            FlowEvent(
-                event_id=f'chip_sc_{fname}_{line_no}_{int(ts * 1000)}',
-                timestamp=ts,
-                layer='GENERAL',
-                sublayer=tag,
-                stage='NETWORK_CONFIG',
-                src=peer if inbound else node_name,
-                dst=node_name if inbound else peer,
-                title=f'{tag}: {body[:68]}',
-                summary=f'{node_name} [{tag}] {body}',
-                details={
-                    'log_file': fname,
-                    'line_number': line_no,
-                    'chip_tag': tag,
-                    'node': node_name,
-                },
-                encapsulation=['Secure Session', tag],
-            )
-        )
-
-  # RX lines usually omit the peer address; reuse the one that the same
-  # exchange printed on another line of this log.
-  exchange_peers: Dict[str, str] = {}
-  for ev in events:
-    if ev.details.get('chip_tag') == 'EM' and ev.details.get('peer_addr'):
-      exchange_peers.setdefault(
-          ev.details['exchange_id'], ev.details['peer_addr']
+      chip_event = _dissect_chip_log_line(
+          chip_line, fname, line_no, node_name
       )
-  for ev in events:
-    details = ev.details
-    peer = exchange_peers.get(details.get('exchange_id', ''))
-    if (
-        details.get('chip_tag') == 'EM'
-        and details.get('transport') == 'IP'
-        and not details.get('peer_addr')
-        and peer
-    ):
-      details['peer_addr'] = peer
-      details['peer_addr_from_exchange'] = True
-      if details['direction'] == 'RX':
-        ev.src = peer
-      else:
-        ev.dst = peer
+      if chip_event:
+        events.append(chip_event)
+
+  _backfill_exchange_peers(events)
   return events
 
 

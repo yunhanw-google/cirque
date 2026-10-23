@@ -14,12 +14,15 @@
 """Shared Docker container transport, D-Bus, and Unix sockets."""
 
 import contextlib
+import logging
 import os
 import selectors
 import socket
 import threading
 import time
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # Containers run under arbitrary UIDs, so proxy sockets must be world-writable.
 _UNIX_SOCKET_MODE = 0o666
@@ -141,8 +144,10 @@ def prepare_container_dbus_socket(
     wait_for_socket_file(sock_path, timeout_s=timeout_s)
     if callable(exec_run):
       exec_run('chmod 0777 /run/dbus/system_bus_socket')
-  except Exception:  # pylint: disable=broad-exception-caught
-    pass
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logger.debug(
+        'Container D-Bus socket setup best-effort step failed: %s', exc
+    )
 
 
 def write_executable_script(
@@ -342,6 +347,16 @@ class UnixToTcpProxy:
     if response:
       client_sock.sendall(response)
 
+  @staticmethod
+  def _forward_ready_keys(selector: selectors.BaseSelector) -> bool:
+    """Forwards ready socket chunks; returns False when a peer closes."""
+    for key, _ in selector.select(timeout=_PUMP_POLL_INTERVAL_S):
+      chunk = key.fileobj.recv(_PUMP_CHUNK_BYTES)
+      if not chunk:
+        return False
+      key.data.sendall(chunk)
+    return True
+
   def _pump_stream(self, client_sock: socket.socket) -> None:
     with (
         self._connect_tcp() as tcp_sock,
@@ -350,9 +365,5 @@ class UnixToTcpProxy:
       selector.register(client_sock, selectors.EVENT_READ, tcp_sock)
       selector.register(tcp_sock, selectors.EVENT_READ, client_sock)
       while self._running.is_set():
-        for key, _ in selector.select(timeout=_PUMP_POLL_INTERVAL_S):
-          ready_sock = key.fileobj
-          chunk = ready_sock.recv(_PUMP_CHUNK_BYTES)
-          if not chunk:
-            return
-          key.data.sendall(chunk)
+        if not self._forward_ready_keys(selector):
+          return

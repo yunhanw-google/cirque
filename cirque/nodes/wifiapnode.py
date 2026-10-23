@@ -148,8 +148,8 @@ class WiFiAPNode(DockerNode):
       self.container.stop(timeout=0)
       try:
         self.container.remove(force=True)
-      except Exception:  # pylint: disable=broad-exception-caught
-        pass
+      except Exception as exc:  # pylint: disable=broad-exception-caught
+        self.logger.debug("WiFiAPNode container remove failed: %s", exc)
       self.container = None
 
   def run(self):
@@ -168,8 +168,10 @@ class WiFiAPNode(DockerNode):
       )
       try:
         self.__setup_network_forward_rules()
-      except Exception:  # pylint: disable=broad-exception-caught
-        pass
+      except Exception as exc:  # pylint: disable=broad-exception-caught
+        self.logger.debug(
+            "Forward rule setup skipped in virtual Wi-Fi: %s", exc
+        )
       return
 
     self.__setup_namespace_networking_env()
