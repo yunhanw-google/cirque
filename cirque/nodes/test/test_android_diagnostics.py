@@ -366,6 +366,46 @@ class TestAndroidEmulatorLogs(unittest.TestCase):
     with open(canonical_mp4, 'rb') as fp:
       self.assertEqual(fp.read(), mp4_bytes)
 
+  def test_save_android_emulator_diagnostics_pulls_profraw_files(self):
+    os.environ['DEVICE_LOG_DIR'] = self.test_dir
+    fake_inst = FakeTestInstance(
+        non_ap_devices=[{
+            'id': '3dc12c79fe62149dc7cd60cbd30f8fdf54e55326',
+            'type': 'android_emulator',
+        }]
+    )
+    fake_inst.scripted_stream['cat /tmp/emulator.log'] = b'emu log'
+    fake_inst.scripted_stream[
+        'adb logcat -d -v threadtime -t 20000'
+    ] = b'logcat'
+    pull_ls_cmd = (
+        "sh -c 'rm -rf /tmp/profraw_tmp && mkdir -p /tmp/profraw_tmp && "
+        'adb pull /data/user/0/com.google.chip.chiptool/files/ '
+        '/tmp/profraw_tmp/ >/dev/null 2>&1; '
+        'find /tmp/profraw_tmp -type f -name "*.profraw" 2>/dev/null || true\''
+    )
+    remote_profraw = '/tmp/profraw_tmp/files/coverage_4521.profraw'
+    fake_inst.scripted_json[pull_ls_cmd] = f'{remote_profraw}\n'
+    profraw_bytes = b'\xfflprofr\x81MOCK_CONTINUOUS_PROFRAW_PAYLOAD'
+    b64_cmd = (
+        f"sh -c 'base64 -w 0 {remote_profraw} 2>/dev/null || "
+        f"base64 {remote_profraw} 2>/dev/null'"
+    )
+    fake_inst.scripted_json[b64_cmd] = base64.b64encode(profraw_bytes).decode(
+        'utf-8'
+    )
+
+    save_android_emulator_diagnostics(fake_inst, 8000)
+
+    expected_profraw = os.path.join(
+        self.test_dir, 'profraw', '3dc12c79-coverage_4521.profraw'
+    )
+    self.assertTrue(
+        os.path.exists(expected_profraw), f'Missing {expected_profraw}'
+    )
+    with open(expected_profraw, 'rb') as fp:
+      self.assertEqual(fp.read(), profraw_bytes)
+
 
 if __name__ == '__main__':
   unittest.main()
