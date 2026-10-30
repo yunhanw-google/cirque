@@ -230,6 +230,9 @@ class AndroidDockerNode(DockerNode):
       sdk_path: Optional[str] = None,
       avd_path: Optional[str] = None,
       chiptool_apk: Optional[str] = None,
+      extra_apks: Optional[list] = None,
+      mac_address: Optional[str] = None,
+      ipv4_addr: Optional[str] = None,
       tap_interface: str = 'cirque_tap0',
       is_tap_station: bool = True,
       pty_bridge_bin: Optional[str] = None,
@@ -250,6 +253,9 @@ class AndroidDockerNode(DockerNode):
     self.adb_serial = f'emulator-{adb_port}'
     self.tap_interface = tap_interface
     self.is_tap_station = is_tap_station
+    self.mac_address = mac_address
+    self.ipv4_addr = ipv4_addr
+    self.extra_apks = extra_apks or []
     self.radio_feature_flags = EMULATOR_RADIO_FEATURE_FLAGS
     self.use_real_emulator = use_real_emulator
 
@@ -409,7 +415,8 @@ class AndroidDockerNode(DockerNode):
     from cirque.capabilities.wificapability import WiFiCapability
 
     station_id = self.get_wifi_station_id()
-    preboot_mac = '02:15:b2:00:00:00'
+    preboot_mac = getattr(self, 'mac_address', None) or '02:15:b2:00:00:00'
+    node_ipv4 = getattr(self, 'ipv4_addr', None) or '10.0.1.5'
     if (
         WiFiCapability._SHARED_VIRTUAL_SERVER is not None
         and hasattr(WiFiCapability._SHARED_VIRTUAL_SERVER, 'register_station')
@@ -417,7 +424,7 @@ class AndroidDockerNode(DockerNode):
       WiFiCapability._SHARED_VIRTUAL_SERVER.register_station(
           station_id=station_id,
           mac_addr=preboot_mac,
-          ipv4_addr='10.0.1.5',
+          ipv4_addr=node_ipv4,
       )
     if (
         WiFiCapability._SHARED_DOCKER_MANAGER is not None
@@ -435,6 +442,14 @@ class AndroidDockerNode(DockerNode):
       return {'status': 'failed', 'error': 'emulator boot timeout'}
 
     self.install_chiptool()
+    for extra in getattr(self, 'extra_apks', None) or []:
+      if isinstance(extra, dict):
+        self.install_app_apk(
+            apk_path=extra.get('apk_path'),
+            package_name=extra.get('package_name', ''),
+        )
+      elif isinstance(extra, str):
+        self.install_app_apk(apk_path=extra, package_name='')
 
     if bt_port is None:
       from cirque.capabilities.bluetoothcapability import BlueToothCapability
@@ -447,6 +462,14 @@ class AndroidDockerNode(DockerNode):
     if not bridge_ok:
       return {'status': 'failed', 'error': 'start_pty_bridge failed'}
 
+    if getattr(self, 'mac_address', None) and self.container is not None:
+      self.container.exec_run(
+          'adb shell "ip link set dev wlan0 down 2>/dev/null || true; '
+          f'ip link set dev wlan0 address {self.mac_address} '
+          '2>/dev/null || true; '
+          'ip link set dev wlan0 up 2>/dev/null || true"'
+      )
+
     guest_mac = self.get_guest_wlan_mac('wlan0')
     if (
         WiFiCapability._SHARED_VIRTUAL_SERVER is not None
@@ -455,7 +478,7 @@ class AndroidDockerNode(DockerNode):
       WiFiCapability._SHARED_VIRTUAL_SERVER.register_station(
           station_id=station_id,
           mac_addr=guest_mac,
-          ipv4_addr='10.0.1.5',
+          ipv4_addr=node_ipv4,
       )
 
     if (
@@ -484,7 +507,7 @@ class AndroidDockerNode(DockerNode):
       guest_ip = self.setup_guest_wifi('wlan0', timeout_sec=20.0)
 
     if guest_ip is None and self.container is not None:
-      fallback_ip = '10.0.1.5'
+      fallback_ip = node_ipv4
       self.container.exec_run(
           'adb shell "svc wifi enable 2>/dev/null || true; '
           'cmd wifi set-wifi-enabled enabled 2>/dev/null || true; '
@@ -500,7 +523,7 @@ class AndroidDockerNode(DockerNode):
         'status': 'success',
         'booted': booted,
         'bridge_ok': bridge_ok,
-        'guest_ip': guest_ip or '10.0.1.5',
+        'guest_ip': guest_ip or node_ipv4,
     }
 
   def setup_tap_device(self, tap_ifname: Optional[str] = None) -> None:
@@ -818,12 +841,13 @@ class AndroidDockerNode(DockerNode):
         break
 
     if target_apk is None:
-      target_apk = '/tmp/CHIPTool.apk'
+      apk_basename = os.path.basename(apk) or 'CHIPTool.apk'
+      target_apk = f'/tmp/{apk_basename}'
       container_id = getattr(self.container, 'id', None)
       cp_success = False
       if container_id:
         cp_res = subprocess.run(
-            ['docker', 'cp', apk, f'{container_id}:/tmp/CHIPTool.apk'],
+            ['docker', 'cp', apk, f'{container_id}:{target_apk}'],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -838,7 +862,7 @@ class AndroidDockerNode(DockerNode):
 
         tar_stream = io.BytesIO()
         with tarfile.open(fileobj=tar_stream, mode='w') as tar:
-          tarinfo = tarfile.TarInfo(name='CHIPTool.apk')
+          tarinfo = tarfile.TarInfo(name=apk_basename)
           tarinfo.size = len(data)
           tar.addfile(tarinfo, io.BytesIO(data))
         tar_stream.seek(0)
@@ -2803,6 +2827,7 @@ class AndroidDockerNode(DockerNode):
         'tap_interface': self.tap_interface,
         'is_tap_station': self.is_tap_station,
         'radio_feature_flags': self.radio_feature_flags,
+        'chiptool_apk': getattr(self, 'chiptool_apk', ''),
     })
     return desc
 

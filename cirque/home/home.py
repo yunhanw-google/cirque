@@ -171,6 +171,9 @@ class CirqueHome:
           tap_interface=device_config.get('tap_interface', 'cirque_tap0'),
           is_tap_station=device_config.get('is_tap_station', True),
           chiptool_apk=device_config.get('chiptool_apk'),
+          extra_apks=device_config.get('extra_apks'),
+          mac_address=device_config.get('mac_address'),
+          ipv4_addr=device_config.get('ipv4_addr'),
       )
     else:
       device_node = DockerNode(
