@@ -26,6 +26,8 @@ REST path.
 """
 
 import base64
+import time
+import gzip
 import os
 from typing import Any
 try:
@@ -240,35 +242,60 @@ def _save_android_screen_recordings(
           )
 
 
+import gzip
+import time
+
 def _save_android_coverage_files(
     test_instance: Any, dev_id: str, short_id: str, log_dir: str
 ) -> None:
   """Discovers and persists LLVM .profraw coverage files from CHIPTool."""
+  
   try:
-    pull_ls_cmd = (
-        "sh -c 'rm -rf /tmp/profraw_tmp && mkdir -p /tmp/profraw_tmp && "
-        'adb pull /data/user/0/com.google.chip.chiptool/files/ '
-        '/tmp/profraw_tmp/ >/dev/null 2>&1; '
-        'find /tmp/profraw_tmp -type f -name "*.profraw" 2>/dev/null || true\''
+    dump_cmd = (
+        "sh -c 'adb shell am broadcast --receiver-foreground -a com.google.chip.chiptool.DUMP_COVERAGE -n com.google.chip.chiptool/com.google.chip.chiptool.CoverageReceiver >/dev/null 2>&1 || true; "
+        "adb shell am broadcast --receiver-foreground -a com.matter.casting.DUMP_COVERAGE -n com.chip.casting/com.matter.casting.CoverageReceiver >/dev/null 2>&1 || true; "
+        "adb shell am broadcast --receiver-foreground -a com.matter.tv.server.DUMP_COVERAGE -n com.matter.tv.server/com.matter.tv.server.CoverageReceiver >/dev/null 2>&1 || true; "
+        "adb shell am broadcast --receiver-foreground -a com.example.contentapp.DUMP_COVERAGE -n com.example.contentapp/com.example.contentapp.CoverageReceiver >/dev/null 2>&1 || true'"
     )
-    ls_res = test_instance.execute_device_cmd(dev_id, pull_ls_cmd)
-    if isinstance(ls_res, dict):
-      ls_out = ls_res.get('output', '') or ls_res.get('return_value', '')
-    else:
-      ls_out = str(ls_res)
-    if isinstance(ls_out, bytes):
-      ls_out = ls_out.decode('utf-8', errors='replace')
-    discovered_paths = [
-        line.strip()
-        for line in str(ls_out).splitlines()
-        if line.strip().endswith('.profraw')
-    ]
-  except Exception as ls_err:  # pylint: disable=broad-except
+    test_instance.execute_device_cmd(dev_id, dump_cmd)
+  except Exception as e:
     if hasattr(test_instance, 'logger') and test_instance.logger:
-      test_instance.logger.debug(
-          'profraw discovery command failed: %s', ls_err
+      test_instance.logger.warning('Failed to send broadcast: %s', e)
+
+  discovered_paths = []
+  for _ in range(15):
+    try:
+      ls_cmd = (
+          "sh -c 'rm -rf /tmp/profraw_tmp && mkdir -p /tmp/profraw_tmp && "
+          "if adb shell \"run-as com.google.chip.chiptool test -s files/coverage.ec\" >/dev/null 2>&1; then adb exec-out \"run-as com.google.chip.chiptool cat files/coverage.ec 2>/dev/null\" > /tmp/profraw_tmp/chiptool.ec; fi; "
+          "if adb shell \"run-as com.google.chip.chiptool test -s files/coverage.profraw\" >/dev/null 2>&1; then adb exec-out \"run-as com.google.chip.chiptool cat files/coverage.profraw 2>/dev/null\" > /tmp/profraw_tmp/chiptool.profraw; fi; "
+          "if adb shell \"run-as com.chip.casting test -s files/coverage.ec\" >/dev/null 2>&1; then adb exec-out \"run-as com.chip.casting cat files/coverage.ec 2>/dev/null\" > /tmp/profraw_tmp/casting.ec; fi; "
+          "if adb shell \"run-as com.chip.casting test -s files/coverage.profraw\" >/dev/null 2>&1; then adb exec-out \"run-as com.chip.casting cat files/coverage.profraw 2>/dev/null\" > /tmp/profraw_tmp/casting.profraw; fi; "
+          "if adb shell \"run-as com.matter.tv.server test -s files/coverage.ec\" >/dev/null 2>&1; then adb exec-out \"run-as com.matter.tv.server cat files/coverage.ec 2>/dev/null\" > /tmp/profraw_tmp/tvserver.ec; fi; "
+          "if adb shell \"run-as com.matter.tv.server test -s files/coverage.profraw\" >/dev/null 2>&1; then adb exec-out \"run-as com.matter.tv.server cat files/coverage.profraw 2>/dev/null\" > /tmp/profraw_tmp/tvserver.profraw; fi; "
+          "if adb shell \"run-as com.example.contentapp test -s files/coverage.ec\" >/dev/null 2>&1; then adb exec-out \"run-as com.example.contentapp cat files/coverage.ec 2>/dev/null\" > /tmp/profraw_tmp/contentapp.ec; fi; "
+          "if adb shell \"run-as com.example.contentapp test -s files/coverage.profraw\" >/dev/null 2>&1; then adb exec-out \"run-as com.example.contentapp cat files/coverage.profraw 2>/dev/null\" > /tmp/profraw_tmp/contentapp.profraw; fi; "
+          "find /tmp/profraw_tmp -size 0 -delete 2>/dev/null || true; "
+          "find /tmp/profraw_tmp -type f \\( -name \"*.profraw\" -o -name \"*.ec\" \\) 2>/dev/null || true'"
       )
-    return
+      ls_res = test_instance.execute_device_cmd(dev_id, ls_cmd)
+      if isinstance(ls_res, dict):
+        ls_out = ls_res.get('output', '') or ls_res.get('return_value', '')
+      else:
+        ls_out = str(ls_res)
+      if isinstance(ls_out, bytes):
+        ls_out = ls_out.decode('utf-8', errors='replace')
+      current_paths = [
+          line.strip()
+          for line in str(ls_out).splitlines()
+          if line.strip().endswith('.profraw') or line.strip().endswith('.ec')
+      ]
+      discovered_paths = current_paths
+      if any(p.endswith('.profraw') for p in current_paths):
+        break
+    except Exception as ls_err:  # pylint: disable=broad-except
+      pass
+    time.sleep(1)
 
   if not discovered_paths:
     return
@@ -277,10 +304,7 @@ def _save_android_coverage_files(
   os.makedirs(coverage_path, exist_ok=True)
   for remote_path in sorted(discovered_paths):
     try:
-      b64_cmd = (
-          f"sh -c 'base64 -w 0 {remote_path} 2>/dev/null || "
-          f"base64 {remote_path} 2>/dev/null'"
-      )
+      b64_cmd = f"sh -c 'gzip -c {remote_path} 2>/dev/null | base64 -w 0 2>/dev/null'"
       b64_res = test_instance.execute_device_cmd(dev_id, b64_cmd)
       if isinstance(b64_res, dict):
         b64_str = b64_res.get('output', '') or b64_res.get('return_value', '')
@@ -291,9 +315,9 @@ def _save_android_coverage_files(
       cleaned_b64 = ''.join(str(b64_str).split())
       if not cleaned_b64:
         continue
-      content = base64.b64decode(cleaned_b64)
+      content = gzip.decompress(base64.b64decode(cleaned_b64))
       if content:
-        prof_name = f'{short_id}-{os.path.basename(remote_path)}'
+        prof_name = f"{short_id}-{os.path.basename(remote_path)}"
         dest_path = os.path.join(coverage_path, prof_name)
         with open(dest_path, 'wb') as fp:
           fp.write(content)
@@ -308,7 +332,6 @@ def _save_android_coverage_files(
         test_instance.logger.warning(
             'Failed to pull coverage file %s: %s', remote_path, err
         )
-
 
 def save_android_emulator_diagnostics(
     test_instance: Any, timestamp: int
@@ -369,6 +392,14 @@ def save_android_emulator_diagnostics(
             'Failed to save emulator log for %s: %s', short_id, e
         )
 
+    # 5. LLVM coverage files: .profraw
+    try:
+      _save_android_coverage_files(test_instance, dev_id, short_id, log_dir)
+    except Exception as e:  # pylint: disable=broad-except
+      if hasattr(test_instance, 'logger') and test_instance.logger:
+        test_instance.logger.warning(
+            'Failed to save coverage files for %s: %s', short_id, e
+        )
     # 2. logcat.log: bounded logcat output
     logcat_file = f'{dev_type}-{timestamp}-{short_id}-logcat.log'
     logcat_path = os.path.join(log_dir, logcat_file)
@@ -434,11 +465,3 @@ def save_android_emulator_diagnostics(
             'Failed to save screen recordings for %s: %s', short_id, e
         )
 
-    # 5. LLVM coverage files: .profraw
-    try:
-      _save_android_coverage_files(test_instance, dev_id, short_id, log_dir)
-    except Exception as e:  # pylint: disable=broad-except
-      if hasattr(test_instance, 'logger') and test_instance.logger:
-        test_instance.logger.warning(
-            'Failed to save coverage files for %s: %s', short_id, e
-        )
