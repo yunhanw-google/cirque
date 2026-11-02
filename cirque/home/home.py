@@ -441,5 +441,17 @@ class CirqueHome:
     if node_id is not None:
       device_node = self.home['devices'][node_id]
       ret = device_node.container.exec_run(cmd, stream=stream)
-      self.logger.info('cmd is: {} and ret: {}'.format(cmd, ret))
+      logged_ret = ret
+      if isinstance(logged_ret, bytes):
+        logged_ret = logged_ret.decode('utf-8', errors='replace')
+        if len(logged_ret) > 2000:
+          logged_ret = logged_ret[:2000] + f"...[truncated {len(logged_ret) - 2000} bytes]"
+      elif isinstance(logged_ret, tuple) and len(logged_ret) >= 2:
+        output = logged_ret[1]
+        if isinstance(output, bytes):
+          output = output.decode('utf-8', errors='replace')
+        if isinstance(output, str) and len(output) > 2000:
+          output = output[:2000] + f"...[truncated {len(output) - 2000} bytes]"
+        logged_ret = (logged_ret[0], output)
+      self.logger.info('cmd is: {} and ret: {}'.format(cmd, logged_ret))
     return ret
