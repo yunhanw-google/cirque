@@ -260,18 +260,18 @@ class SpinelHdlcRfProxy:
             frame_len_bytes=psdu_len,
             record_telemetry=True,
         )
-        if (
+        should_drop_ack = (
             sample.dropped
             and frame_type == 1
             and ack_requested
             and security_enabled
             and psdu_len >= 60
             and is_retx == 0
-        ):
-          tid = body[0] & 0x0F
-          if tid != 0:
-            with self._lock:
-              self._pending_no_ack_tids.add(tid)
+            and (body[0] & 0x0F) != 0
+        )
+        if should_drop_ack:
+          with self._lock:
+            self._pending_no_ack_tids.add(body[0] & 0x0F)
     return body
 
   def _rewrite_packed_radio_frame(
@@ -574,12 +574,17 @@ class SpinelHdlcRfProxy:
     self._thread = None
 
 
+_THREAD_SNIFFERS = {}
+
+
 class ThreadSimPipe:
   __next_petition_id = 0
   __THREAD_GROUP_SIZE = 34
   __petition_mutex = Lock()
   # petition_id -> [ThreadRadioSniffer, number of open pipes]
-  __sniffers = {}
+  _sniffers = _THREAD_SNIFFERS
+  __sniffers = _THREAD_SNIFFERS
+  _ThreadSimPipe__sniffers = _THREAD_SNIFFERS
   __sniffer_mutex = Lock()
 
   @classmethod

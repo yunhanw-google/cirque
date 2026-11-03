@@ -345,6 +345,63 @@ class BluezDbusVirtualService(BluezGattPeripheralMixin):
           logger.debug('Device export failed for %s: %s', dev_path, exc)
     return dev_path
 
+  def _handle_adapter_method(
+      self,
+      bridge: Optional[VirtualBluezAdapterBridge],
+      method_name: str,
+      parameters: object,
+      invocation: object,
+  ) -> None:
+    """Handles org.bluez.Adapter1 D-Bus method calls."""
+    if method_name == 'StartDiscovery':
+      with self._lock:
+        self._discovered_dev_paths.clear()
+    elif method_name == 'RemoveDevice':
+      with self._lock:
+        self._discovered_dev_paths.discard(parameters.unpack()[0])
+    handle_bluez_adapter_method(bridge, method_name, parameters, invocation)
+
+  def _handle_gatt_manager_method(
+      self,
+      cid: str,
+      bridge: Optional[VirtualBluezAdapterBridge],
+      connection: object,
+      sender: str,
+      method_name: str,
+      parameters: object,
+      invocation: object,
+  ) -> None:
+    """Handles org.bluez.GattManager1 D-Bus method calls."""
+    if method_name == 'RegisterApplication':
+      self._close_peripheral_fds(cid)
+      app_path = parameters.unpack()[0]
+      if bridge is not None:
+        try:
+          objs = query_app_managed_objects(connection, sender, app_path)
+          # pylint: disable=g-import-not-at-top
+          from cirque.virtual_bt.att_db import (
+              build_att_database_from_gatt_objects,
+          )
+          bridge.set_att_database(
+              build_att_database_from_gatt_objects(objs)
+          )
+          logger.info(
+              'Built dynamic ATT database for %s from registered app %s'
+              ' (%d objects)',
+              cid,
+              app_path,
+              len(objs),
+          )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+          logger.warning(
+              'Failed building dynamic ATT database for %s: %s', cid, exc
+          )
+          invocation.return_dbus_error('org.bluez.Error.Failed', str(exc))
+          return
+      self._registered_apps[cid] = (sender, app_path)
+      self._registered_app_conns[cid] = connection
+    invocation.return_value(None)
+
   def _handle_adv_manager_method(
       self,
       cid: str,
@@ -405,46 +462,11 @@ class BluezDbusVirtualService(BluezGattPeripheralMixin):
       )
       bridge = self.docker_manager.adapter_bridges.get(cid)
       if interface_name == 'org.bluez.Adapter1':
-        if method_name == 'StartDiscovery':
-          with self._lock:
-            self._discovered_dev_paths.clear()
-        elif method_name == 'RemoveDevice':
-          dev_part = parameters.unpack()[0].split('/')[-1]
-          with self._lock:
-            self._discovered_dev_paths.discard(parameters.unpack()[0])
-        handle_bluez_adapter_method(
-            bridge, method_name, parameters, invocation
-        )
+        self._handle_adapter_method(bridge, method_name, parameters, invocation)
       elif interface_name == 'org.bluez.GattManager1':
-        if method_name == 'RegisterApplication':
-          self._close_peripheral_fds(cid)
-          app_path = parameters.unpack()[0]
-          if bridge is not None:
-            try:
-              objs = query_app_managed_objects(connection, sender, app_path)
-              # pylint: disable=g-import-not-at-top
-              from cirque.virtual_bt.att_db import (
-                  build_att_database_from_gatt_objects,
-              )
-              bridge.set_att_database(
-                  build_att_database_from_gatt_objects(objs)
-              )
-              logger.info(
-                  'Built dynamic ATT database for %s from registered app %s'
-                  ' (%d objects)',
-                  cid,
-                  app_path,
-                  len(objs),
-              )
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-              logger.warning(
-                  'Failed building dynamic ATT database for %s: %s', cid, exc
-              )
-              invocation.return_dbus_error('org.bluez.Error.Failed', str(exc))
-              return
-          self._registered_apps[cid] = (sender, app_path)
-          self._registered_app_conns[cid] = connection
-        invocation.return_value(None)
+        self._handle_gatt_manager_method(
+            cid, bridge, connection, sender, method_name, parameters, invocation
+        )
       elif interface_name == 'org.bluez.LEAdvertisingManager1':
         self._handle_adv_manager_method(
             cid,

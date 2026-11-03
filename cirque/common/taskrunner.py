@@ -86,9 +86,11 @@ class _TaskRunner:
                     self.logger.info("Handled task.")
                     taskStart = time.time()
                     task.run()
-                    self.logger.info(f"Task handling duration: {time.time() - taskStart}s")
+                    self.logger.info(
+                        "Task handling duration: %ss", time.time() - taskStart
+                    )
                 except queue.Empty:
-                    self.logger.info(f"No task")
+                    self.logger.info("No task")
                     pass
                 self.queue_cv.wait()
         self.logger.info("Task runner stopped.")

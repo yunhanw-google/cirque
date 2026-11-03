@@ -75,20 +75,23 @@ class DockerNetworkCapability(BaseCapability):
       raw_tar = b''.join(bits)
       with tarfile.open(fileobj=io.BytesIO(raw_tar), mode='r:*') as tf:
         for member in tf.getmembers():
-          if member.isfile():
-            extracted = tf.extractfile(member)
-            if extracted is not None:
-              data = extracted.read()
-              if len(data) >= 24:
-                os.makedirs(pcap_dir, exist_ok=True)
-                node_type = getattr(docker_node, 'type', None) or 'node'
-                safe_type = re.sub(r'[^A-Za-z0-9_.-]+', '_', str(node_type))
-                node_id = (getattr(docker_node, 'id', None) or '00000000')[:8]
-                out_path = os.path.join(
-                    pcap_dir, f'eth_{safe_type}_{node_id}.pcap'
-                )
-                with open(out_path, 'wb') as out_f:
-                  out_f.write(data)
+          if not member.isfile():
+            continue
+          extracted = tf.extractfile(member)
+          if extracted is None:
+            continue
+          data = extracted.read()
+          if len(data) < 24:
+            continue
+          os.makedirs(pcap_dir, exist_ok=True)
+          node_type = getattr(docker_node, 'type', None) or 'node'
+          safe_type = re.sub(r'[^A-Za-z0-9_.-]+', '_', str(node_type))
+          node_id = (getattr(docker_node, 'id', None) or '00000000')[:8]
+          out_path = os.path.join(
+              pcap_dir, f'eth_{safe_type}_{node_id}.pcap'
+          )
+          with open(out_path, 'wb') as out_f:
+            out_f.write(data)
     except Exception as exc:  # pylint: disable=broad-exception-caught
       self.logger.debug('Failed to export eth0 pcap: %s', exc)
 

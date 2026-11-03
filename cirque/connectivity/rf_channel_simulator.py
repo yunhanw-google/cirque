@@ -871,16 +871,18 @@ class RfChannelSimulator:
           'wifi_channel',
           'thread_channel',
       ):
-        if field_name in updates and updates[field_name] is not None:
-          cur_val = getattr(self.config, field_name)
-          if isinstance(cur_val, bool):
-            setattr(self.config, field_name, bool(updates[field_name]))
-          elif isinstance(cur_val, int):
-            setattr(self.config, field_name, int(updates[field_name]))
-          elif isinstance(cur_val, float):
-            setattr(self.config, field_name, float(updates[field_name]))
-          else:
-            setattr(self.config, field_name, str(updates[field_name]))
+        if field_name not in updates or updates[field_name] is None:
+          continue
+        cur_val = getattr(self.config, field_name)
+        val = updates[field_name]
+        if isinstance(cur_val, bool):
+          setattr(self.config, field_name, bool(val))
+        elif isinstance(cur_val, int):
+          setattr(self.config, field_name, int(val))
+        elif isinstance(cur_val, float):
+          setattr(self.config, field_name, float(val))
+        else:
+          setattr(self.config, field_name, str(val))
       if 'seed' in updates:
         self.set_seed(
             int(updates['seed']) if updates['seed'] is not None else None

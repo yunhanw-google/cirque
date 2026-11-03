@@ -269,9 +269,7 @@ class TestPcapCapability(unittest.TestCase):
         for bit in range(8):
           in_bit = (b >> bit) & 1
           feed = ((lfsr >> 23) & 1) ^ in_bit
-          lfsr = ((lfsr << 1) & 0xFFFFFF)
-          if feed:
-            lfsr ^= 0x00065B
+          lfsr = ((lfsr << 1) & 0xFFFFFF) ^ (0x00065B if feed else 0)
       # Transmit bit 0 (position 23 down to 0) LSB first per byte
       out = bytearray(3)
       for i in range(24):

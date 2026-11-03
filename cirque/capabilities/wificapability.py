@@ -36,6 +36,9 @@ from pyroute2 import NetNS
 ExecResult = namedtuple("ExecResult", ["exit_code", "output"])
 
 
+_WIFI_STATIONS_LIST = []
+
+
 class WiFiCapability(BaseCapability):
   """Cirque Wi-Fi Capability.
 
@@ -44,7 +47,7 @@ class WiFiCapability(BaseCapability):
 
   RUNTIME_NAMESPACE = "/var/run/netns"
   DEFAULT_RADIOS = 20
-  WIFI_STATIONS_LIST = []
+  WIFI_STATIONS_LIST = _WIFI_STATIONS_LIST
   _SHARED_VIRTUAL_SERVER = None
   _SHARED_DOCKER_MANAGER = None
   _SHARED_WPA_DBUS = None
@@ -160,9 +163,9 @@ class WiFiCapability(BaseCapability):
           self.use_virtual_wifi_tcp = True
 
     if self.use_virtual_wifi_tcp:
-      self.__setup_virtual_wifi_station()
+      self._setup_virtual_wifi_station()
 
-  def __setup_virtual_wifi_station(self):
+  def _setup_virtual_wifi_station(self):
     server = self.get_or_start_virtual_server(
         host=self.virtual_wifi_host,
         control_port=self.control_port,
@@ -329,8 +332,8 @@ class WiFiCapability(BaseCapability):
     if not WiFiCapability.is_mac80211_hwsim_loaded():
       WiFiCapability.load_kernel_mac80211_hwsim()
     try:
-      self.__get_available_phy_device(docker_node)
-      self.__phy_namespace_setup(docker_node)
+      self._get_available_phy_device(docker_node)
+      self._phy_namespace_setup(docker_node)
       if docker_node.type != "wifi_ap":
         self.start_wpa_supplicant_service(docker_node)
     except Exception as e:
@@ -353,7 +356,7 @@ class WiFiCapability(BaseCapability):
       return
     try:
       docker_node.container.exec_run("killall wpa_supplicant")
-      self.__phy_namespace_restore(docker_node)
+      self._phy_namespace_restore(docker_node)
     except Exception as e:
       self.logger.exception("%r", e)
     self.logger.info(
@@ -391,7 +394,7 @@ class WiFiCapability(BaseCapability):
       mgr.connect_station_to_ap(self.station_id, ssid, psk)
     return ExecResult(exit_code=0, output=b"")
 
-  def __get_available_phy_device(self, docker_node):
+  def _get_available_phy_device(self, docker_node):
     ret = utils.host_run(self.logger, "iw dev")
     if ret.stderr != b"":
       raise PHYDeviceError("Error:{}".format(ret.stderr))
@@ -422,17 +425,17 @@ class WiFiCapability(BaseCapability):
         docker_node.wlan_interface,
     )
 
-  def __phy_namespace_setup(self, docker_node):
+  def _phy_namespace_setup(self, docker_node):
     try:
-      self.__mount_container_namespace_to_host(docker_node)
-      self.__add_phy_device_to_container_namespace(docker_node)
-      self.__bring_up_wifi_interface(docker_node)
+      self._mount_container_namespace_to_host(docker_node)
+      self._add_phy_device_to_container_namespace(docker_node)
+      self._bring_up_wifi_interface(docker_node)
     except Exception as e:
       docker_node.logger.exception("%r", e)
-      self.__phy_namespace_restore(docker_node)
-      raise NameSpaceOperatingError("{!r}".format(e))
+      self._phy_namespace_restore(docker_node)
+      raise NameSpaceOperatingError("{!r}".format(e)) from e
 
-  def __mount_container_namespace_to_host(self, docker_node):
+  def _mount_container_namespace_to_host(self, docker_node):
     if not os.path.isdir(self.RUNTIME_NAMESPACE):
       os.makedirs(self.RUNTIME_NAMESPACE)
     if not os.path.isdir(self.RUNTIME_NAMESPACE):
@@ -451,7 +454,7 @@ class WiFiCapability(BaseCapability):
           )
       )
 
-  def __add_phy_device_to_container_namespace(self, docker_node):
+  def _add_phy_device_to_container_namespace(self, docker_node):
     ret = utils.host_run(
         docker_node.logger,
         "iw phy {} set netns name {}".format(
@@ -465,7 +468,7 @@ class WiFiCapability(BaseCapability):
           )
       )
 
-  def __bring_up_wifi_interface(self, docker_node):
+  def _bring_up_wifi_interface(self, docker_node):
     commands = [
         "ip link set {} down".format(docker_node.wlan_interface),
         "ip link set {} name wlan0".format(docker_node.wlan_interface),
@@ -478,7 +481,7 @@ class WiFiCapability(BaseCapability):
             "Error: {} on command: {}".format(ret.stderr, command)
         )
 
-  def __phy_namespace_restore(self, docker_node):
+  def _phy_namespace_restore(self, docker_node):
     self.logger.debug("running phy device namespace restore...")
     if not os.path.isfile(
         os.path.join(self.RUNTIME_NAMESPACE, docker_node.name)
@@ -506,6 +509,19 @@ class WiFiCapability(BaseCapability):
       raise NameSpaceOperatingError(
           "Error: {} on delete netns: {}".format(ret.stderr, docker_node.name)
       )
+
+  # Backward compatibility aliases for double-underscore methods
+  _WiFiCapability__setup_virtual_wifi_station = _setup_virtual_wifi_station
+  _WiFiCapability__get_available_phy_device = _get_available_phy_device
+  _WiFiCapability__phy_namespace_setup = _phy_namespace_setup
+  _WiFiCapability__mount_container_namespace_to_host = (
+      _mount_container_namespace_to_host
+  )
+  _WiFiCapability__add_phy_device_to_container_namespace = (
+      _add_phy_device_to_container_namespace
+  )
+  _WiFiCapability__bring_up_wifi_interface = _bring_up_wifi_interface
+  _WiFiCapability__phy_namespace_restore = _phy_namespace_restore
 
   @staticmethod
   def is_mac80211_hwsim_loaded():

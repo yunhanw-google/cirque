@@ -271,18 +271,20 @@ def commission_chiptool(home_id, device_id):
           '2>&1 & echo $! > /tmp/dataset_helper.pid"'
       )
       for dev_id, dev_node in homes[home_id].devices.items():
-        if (
+        is_candidate = (
             dev_id != device_id
             and getattr(dev_node, 'type', '') != 'ThreadBorderRouter'
             and any(
                 getattr(c, 'name', '') == 'Thread'
                 for c in getattr(dev_node, 'capabilities', [])
             )
-        ):
-          if getattr(dev_node, 'container', None) is not None:
-            dev_node.container.exec_run(helper_cmd, detach=True)
-          else:
-            homes[home_id].execute_device_cmd(helper_cmd, dev_id)
+        )
+        if not is_candidate:
+          continue
+        if getattr(dev_node, 'container', None) is not None:
+          dev_node.container.exec_run(helper_cmd, detach=True)
+        else:
+          homes[home_id].execute_device_cmd(helper_cmd, dev_id)
     channel = request.args.get('channel', None)
     if channel is not None:
       channel = int(channel)

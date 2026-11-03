@@ -122,51 +122,62 @@ class UiAutomatorHelper:
       for node in nodes:
         r_id = node.attrib.get('resource-id', '')
         bounds = node.attrib.get('bounds', '')
-        if bounds and (
+        if not bounds:
+          continue
+        matches_rid = (
             resource_id == r_id
             or r_id.endswith(f':id/{resource_id}')
             or resource_id in r_id
-        ):
+        )
+        if matches_rid:
           parsed = cls.parse_bounds(bounds)
           if parsed:
             return parsed
 
     if text:
-      needle = text.strip().lower()
-      word_re = re.compile(rf'(?<!\w){re.escape(needle)}(?!\w)')
-      for exact in (True, False):
-        for node in nodes:
-          if resource_id and node.attrib.get('resource-id', ''):
-            continue
-          t = node.attrib.get('text', '').strip().lower()
-          bounds = node.attrib.get('bounds', '')
-          if not bounds or not t:
-            continue
-          if (exact and t == needle) or (
-              not exact and bool(word_re.search(t))
-          ):
-            parsed = cls.parse_bounds(bounds)
-            if parsed:
-              return parsed
+      parsed = cls._find_attr_bounds(
+          nodes, text, 'text', skip_resource_id=bool(resource_id)
+      )
+      if parsed:
+        return parsed
 
     if content_desc:
-      needle = content_desc.strip().lower()
-      word_re = re.compile(rf'(?<!\w){re.escape(needle)}(?!\w)')
-      for exact in (True, False):
-        for node in nodes:
-          if resource_id and node.attrib.get('resource-id', ''):
-            continue
-          c_desc = node.attrib.get('content-desc', '').strip().lower()
-          bounds = node.attrib.get('bounds', '')
-          if not bounds or not c_desc:
-            continue
-          if (exact and c_desc == needle) or (
-              not exact and bool(word_re.search(c_desc))
-          ):
-            parsed = cls.parse_bounds(bounds)
-            if parsed:
-              return parsed
+      parsed = cls._find_attr_bounds(
+          nodes,
+          content_desc,
+          'content-desc',
+          skip_resource_id=bool(resource_id),
+      )
+      if parsed:
+        return parsed
 
+    return None
+
+  @classmethod
+  def _find_attr_bounds(
+      cls,
+      nodes: List[Any],
+      target: str,
+      attr_name: str,
+      skip_resource_id: bool = False,
+  ) -> Optional[Tuple[int, int, int, int]]:
+    needle = target.strip().lower()
+    word_re = re.compile(rf'(?<!\w){re.escape(needle)}(?!\w)')
+    for exact in (True, False):
+      for node in nodes:
+        if skip_resource_id and node.attrib.get('resource-id', ''):
+          continue
+        val = node.attrib.get(attr_name, '').strip().lower()
+        bounds = node.attrib.get('bounds', '')
+        if not bounds or not val:
+          continue
+        matches = (exact and val == needle) or (
+            not exact and bool(word_re.search(val))
+        )
+        if matches:
+          parsed = cls.parse_bounds(bounds)
+          if parsed:
+            return parsed
     return None
 
   @classmethod

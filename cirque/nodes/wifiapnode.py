@@ -144,7 +144,7 @@ class WiFiAPNode(DockerNode):
 
   def stop(self):
     if hasattr(self, "container") and self.container:
-      self.__teardown()
+      self._teardown()
       self.container.stop(timeout=0)
       try:
         self.container.remove(force=True)
@@ -159,7 +159,7 @@ class WiFiAPNode(DockerNode):
       kwargs.update({"name": self.container_name})
 
     super().run(**kwargs)
-    self.logger.info("Creating WiFi AP node: {}".format(self.name))
+    self.logger.info("Creating WiFi AP node: %s", self.name)
     if self.wifi_capability.use_virtual_wifi_tcp:
       WiFiCapability.register_virtual_ap(
           ssid=self.ssid,
@@ -167,19 +167,19 @@ class WiFiAPNode(DockerNode):
           ap_id=self.name or "ap0",
       )
       try:
-        self.__setup_network_forward_rules()
+        self._setup_network_forward_rules()
       except Exception as exc:  # pylint: disable=broad-exception-caught
         self.logger.debug(
             "Forward rule setup skipped in virtual Wi-Fi: %s", exc
         )
       return
 
-    self.__setup_namespace_networking_env()
-    self.__setup_network_forward_rules()
-    self.__update_hostapd_ssid()
-    self.__update_hostapd_password()
-    self.__run_hostapd()
-    self.__run_dnsmasq()
+    self._setup_namespace_networking_env()
+    self._setup_network_forward_rules()
+    self._update_hostapd_ssid()
+    self._update_hostapd_password()
+    self._run_hostapd()
+    self._run_dnsmasq()
     utils.sleep_time(self.logger, 2, "creating WiFi AP node")
 
   def get_wifi_ssid(self):
@@ -198,19 +198,19 @@ class WiFiAPNode(DockerNode):
         else "".join(random.choice(CHAR_SRC) for _ in range(8))
     )
 
-  def __run_hostapd(self):
+  def _run_hostapd(self):
     ret = self.container.exec_run(
         "/usr/sbin/hostapd -B /etc/hostapd/hostapd.conf"
     )
     if ret.exit_code != 0:
       raise ContainerExecError("unable to start up hostapd server!!")
 
-  def __run_dnsmasq(self):
+  def _run_dnsmasq(self):
     ret = self.container.exec_run("/usr/sbin/dnsmasq -C /etc/dnsmasq.conf")
     if ret.exit_code != 0:
       raise ContainerExecError("unable to start up dnsmasq server!!")
 
-  def __setup_namespace_networking_env(self):
+  def _setup_namespace_networking_env(self):
     network_commands = [
         "ip addr flush dev wlan0",
         "ip addr add 10.0.1.1/24 dev wlan0",
@@ -227,7 +227,7 @@ class WiFiAPNode(DockerNode):
     if ret.exit_code != 0:
       raise ContainerExecError("unable to set default gw for wlan0")
 
-  def __setup_network_forward_rules(self):
+  def _setup_network_forward_rules(self):
     forward_rules = [
         "iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE",
         (
@@ -242,7 +242,7 @@ class WiFiAPNode(DockerNode):
       if ret.exit_code != 0 and not self.wifi_capability.use_virtual_wifi_tcp:
         raise ContainerExecError("unable to set forward rule: {}".format(rule))
 
-  def __update_hostapd_ssid(self):
+  def _update_hostapd_ssid(self):
     ret = self.container.exec_run(
         "sed -i 's/ssid=/ssid={}/' /etc/hostapd/hostapd.conf".format(self.ssid)
     )
@@ -251,7 +251,7 @@ class WiFiAPNode(DockerNode):
           "failed to set wifi ap ssid: {}".format(self.ssid)
       )
 
-  def __update_hostapd_password(self):
+  def _update_hostapd_password(self):
     ret = self.container.exec_run(
         "sed -i 's/wpa_passphrase=/wpa_passphrase={}/' "
         "/etc/hostapd/hostapd.conf".format(self.password)
@@ -261,10 +261,18 @@ class WiFiAPNode(DockerNode):
           "failed to set wifi ap password: {}".format(self.password)
       )
 
-  def __teardown(self):
+  def _teardown(self):
     if not self.wifi_capability.use_virtual_wifi_tcp:
       self.logger.info("stopping hostapd...")
       self.container.exec_run("killall hostapd")
       self.logger.info("stopping dnsmasq...")
       self.container.exec_run("killall dnsmasq")
     self.wifi_capability.disable_capability(self)
+
+  _WiFiAPNode__run_hostapd = _run_hostapd
+  _WiFiAPNode__run_dnsmasq = _run_dnsmasq
+  _WiFiAPNode__setup_namespace_networking_env = _setup_namespace_networking_env
+  _WiFiAPNode__setup_network_forward_rules = _setup_network_forward_rules
+  _WiFiAPNode__update_hostapd_ssid = _update_hostapd_ssid
+  _WiFiAPNode__update_hostapd_password = _update_hostapd_password
+  _WiFiAPNode__teardown = _teardown

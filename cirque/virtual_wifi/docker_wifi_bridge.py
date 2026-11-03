@@ -182,25 +182,29 @@ class VirtualDhcpServer:
     self.offers[mac_hex] = assigned
     return assigned
 
+  def _connect_and_handshake(self) -> Optional[socket.socket]:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    sock.connect((self.server_host, self.data_port))
+    with self._lock:
+      if not self._running:
+        sock.close()
+        return None
+      self._sock = sock
+    sid = b'dhcp_server'
+    sock.sendall(struct.pack('!H', len(sid)) + sid)
+    if self.server is not None:
+      st = self.server.get_station('dhcp_server')
+      if st is not None:
+        st.state = 'completed'
+    return sock
+
   def _run_loop(self) -> None:
     while self._running:
       try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        sock.connect((self.server_host, self.data_port))
-        with self._lock:
-          if not self._running:
-            sock.close()
-            return
-          self._sock = sock
-        # Handshake with VirtualWiFiServer data_port: 'dhcp_server'
-        sid = b'dhcp_server'
-        sock.sendall(struct.pack('!H', len(sid)) + sid)
-        if self.server is not None:
-          # SIMULATION-DISCLOSURE: dhcp_server pseudo-station pre-marked completed on DS side.
-          st = self.server.get_station('dhcp_server')
-          if st is not None:
-            st.state = 'completed'
+        sock = self._connect_and_handshake()
+        if sock is None:
+          return
         while self._running:
           hdr = self._recv_exact(sock, 2)
           if not hdr:

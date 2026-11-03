@@ -12,8 +12,8 @@ Cirque.
 -   **Purpose**: Protocol-agnostic virtual home and RF network simulation in
     Cirque.
 -   **Triggers**: Use when creating, managing, or diagnosing simulated RF
-    topologies (Virtual Bluetooth LE/GATT, Virtual Wi-Fi WPA2, OpenThread mesh,
-    Android emulator nodes), running cross-layer PCAP capture and flow visualizer
-    generation, or extending Cirque base MCP tools. Don't use for Matter-specific
-    PASE/CASE commissioning or CHIPTool cluster actions; use
+    topologies (Virtual Bluetooth LE/GATT, Virtual Wi-Fi WPA2, OpenThread
+    mesh, Android emulator nodes), running cross-layer PCAP capture and flow
+    visualizer generation, or extending Cirque base MCP tools. Don't use for
+    Matter-specific PASE/CASE commissioning or CHIPTool cluster actions; use
     `cirque-virtual-testing` in `connectedhomeip` instead.

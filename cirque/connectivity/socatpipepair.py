@@ -21,7 +21,7 @@ import threading
 class SocatPipePair:
 
   @staticmethod
-  def __find_socat_pts(stream, wait_lines=5):
+  def _find_socat_pts(stream, wait_lines=5):
     # socat creates pipe file /dev/pts/${NUMBER}
     r = re.compile('/dev/pts/.*$')
     for _ in range(wait_lines):
@@ -47,8 +47,8 @@ class SocatPipePair:
         ],
         stderr=subprocess.PIPE,
     )
-    self.pipe0 = SocatPipePair.__find_socat_pts(self.socat.stderr)
-    self.pipe1 = SocatPipePair.__find_socat_pts(self.socat.stderr)
+    self.pipe0 = SocatPipePair._find_socat_pts(self.socat.stderr)
+    self.pipe1 = SocatPipePair._find_socat_pts(self.socat.stderr)
 
     def drain():
       for _ in self.socat.stderr:
@@ -68,3 +68,5 @@ class SocatPipePair:
 
   def __del__(self):
     self.close()
+
+  _SocatPipePair__find_socat_pts = _find_socat_pts

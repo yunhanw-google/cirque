@@ -27,6 +27,9 @@ CIRQUE_ROOT = dirname(dirname(dirname(abspath(__file__))))
 BLUEZ_DIR = os.path.join(CIRQUE_ROOT, 'bluez')
 
 
+_BLE_ADAPTS_LIST = []
+
+
 class BlueToothCapability(BaseCapability):
   """Cirque Bluetooth Capability with Virtual BT and legacy btvirt support.
 
@@ -50,7 +53,7 @@ class BlueToothCapability(BaseCapability):
        binary or kernel module is unavailable on the host.
   """
 
-  BLE_ADAPTS_LIST = []
+  BLE_ADAPTS_LIST = _BLE_ADAPTS_LIST
   _SHARED_VIRTUAL_SERVER = None
   _SHARED_DOCKER_MANAGER = None
   _SHARED_BLUEZ_DBUS = None
@@ -161,11 +164,11 @@ class BlueToothCapability(BaseCapability):
             btvirt_bin,
         )
       self.use_virtual_bt_tcp = True
-      self.__setup_virtual_bt_controller()
+      self._setup_virtual_bt_controller()
     else:
-      self.__run_bluetoothd()
-      self.__run_btvirt_infs()
-      self.__get_ble_controller()
+      self._run_bluetoothd()
+      self._run_btvirt_infs()
+      self._get_ble_controller()
 
   @property
   def name(self):
@@ -191,7 +194,7 @@ class BlueToothCapability(BaseCapability):
         ),
     }
 
-  def __setup_virtual_bt_controller(self):
+  def _setup_virtual_bt_controller(self):
     server = self.get_or_start_virtual_server(
         host=self.virtual_bt_host,
         control_port=self.control_port,
@@ -365,7 +368,7 @@ class BlueToothCapability(BaseCapability):
     utils.host_run(self.logger, 'killall btvirt')
     utils.host_run(self.logger, 'killall bluetoothd')
 
-  def __get_ble_controller(self):
+  def _get_ble_controller(self):
     self.logger.info('start getting ble adapters...')
     command = os.path.join(
         BLUEZ_DIR, "tools/hciconfig | awk '/Bus: Virtual/ {print $1}' | sort"
@@ -398,14 +401,14 @@ class BlueToothCapability(BaseCapability):
         'BLE_ADAPTS_LIST: \n%s', BlueToothCapability.BLE_ADAPTS_LIST
     )
 
-  def __is_btvirt_running(self):
+  def _is_btvirt_running(self):
     ret = utils.host_run(
         self.logger, "ps aux | grep btvirt | grep -v grep | awk '{print $11}'"
     ).stdout
     self.logger.info('btvirt running: %s', ret)
     return CIRQUE_ROOT in ret.decode('utf-8')
 
-  def __is_bluetoothd_running(self):
+  def _is_bluetoothd_running(self):
     ret = utils.host_run(
         self.logger,
         "ps aux | grep bluetoothd | grep -v grep | awk '{print $11}'",
@@ -413,8 +416,8 @@ class BlueToothCapability(BaseCapability):
     self.logger.warning('bluetoothd running: %s', ret)
     return CIRQUE_ROOT in ret.decode('utf-8')
 
-  def __run_bluetoothd(self):
-    if self.__is_bluetoothd_running():
+  def _run_bluetoothd(self):
+    if self._is_bluetoothd_running():
       return
     self.logger.info('kill all bluetoothd')
     utils.host_run(self.logger, 'killall bluetoothd')
@@ -424,11 +427,11 @@ class BlueToothCapability(BaseCapability):
         os.path.join(BLUEZ_DIR, 'src/bluetoothd --experimental --debug &')
     )
     time.sleep(2)
-    if not self.__is_bluetoothd_running():
+    if not self._is_bluetoothd_running():
       raise RuntimeError('Unable to run bluetoothd')
 
-  def __run_btvirt_infs(self):
-    if self.__is_btvirt_running():
+  def _run_btvirt_infs(self):
+    if self._is_btvirt_running():
       return
     utils.host_run(self.logger, 'killall btvirt')
     time.sleep(3)
@@ -436,5 +439,15 @@ class BlueToothCapability(BaseCapability):
     os.system(os.path.join(BLUEZ_DIR, 'emulator/btvirt -L -l2 &'))
     time.sleep(2)
     self.logger.info('done creating virtual ble...')
-    if not self.__is_btvirt_running():
+    if not self._is_btvirt_running():
       raise RuntimeError('Unable to run btvirt')
+
+  # Backward compatibility aliases for double-underscore methods
+  _BlueToothCapability__setup_virtual_bt_controller = (
+      _setup_virtual_bt_controller
+  )
+  _BlueToothCapability__get_ble_controller = _get_ble_controller
+  _BlueToothCapability__is_btvirt_running = _is_btvirt_running
+  _BlueToothCapability__is_bluetoothd_running = _is_bluetoothd_running
+  _BlueToothCapability__run_bluetoothd = _run_bluetoothd
+  _BlueToothCapability__run_btvirt_infs = _run_btvirt_infs

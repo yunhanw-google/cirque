@@ -258,12 +258,14 @@ class AttDatabase:
   ) -> Optional[Tuple[int, int]]:
     """Returns (decl_handle, val_handle) for a characteristic UUID."""
     for handle, attr in self.attributes.items():
-      if attr.type_uuid == uuid_to_bytes(GATT_CHARACTERISTIC_UUID16):
-        if len(attr.value) >= 3:
-          val_h = struct.unpack('<H', attr.value[1:3])[0]
-          c_uuid_raw = attr.value[3:]
-          if uuid_matches(c_uuid_raw, char_uuid):
-            return handle, val_h
+      if attr.type_uuid != uuid_to_bytes(GATT_CHARACTERISTIC_UUID16):
+        continue
+      if len(attr.value) < 3:
+        continue
+      val_h = struct.unpack('<H', attr.value[1:3])[0]
+      c_uuid_raw = attr.value[3:]
+      if uuid_matches(c_uuid_raw, char_uuid):
+        return handle, val_h
     return None
 
   def find_cccd_for_char(self, val_handle: int) -> Optional[int]:

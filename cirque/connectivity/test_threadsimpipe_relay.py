@@ -222,38 +222,45 @@ while True:
       nonlocal host_tx_count
       while host_tx_count < 1600:
         r, w, _ = select.select([], [host_fd], [], 0.1)
-        if host_fd in w:
-          frame = bytes([128, 6, 0, 0, 0, 0, 0, 0])
-          try:
-            os.write(host_fd, hdlc_encode_frame(frame))
-            host_tx_count += 1
-          except OSError as exc:
-            _ = exc
-            time.sleep(0.005)
+        if host_fd not in w:
+          continue
+        frame = bytes([128, 6, 0, 0, 0, 0, 0, 0])
+        try:
+          os.write(host_fd, hdlc_encode_frame(frame))
+          host_tx_count += 1
+        except OSError as exc:
+          _ = exc
+          time.sleep(0.005)
 
     t1 = threading.Thread(target=host_sender, daemon=True)
     t1.start()
 
     while True:
       r, _, _ = select.select([host_fd], [], [], 0.1)
-      if host_fd in r:
-        try:
-          chunk = os.read(host_fd, 4096)
-          if chunk:
-            buf.extend(chunk)
-            while b"~" in buf:
-              part, buf = buf.split(b"~", 1)
-              if not part: continue
-              frame = hdlc_decode_frame(part)
-              if frame:
-                if frame.startswith(b"\x80\x06\x00\x00") and len(frame) >= 6:
-                  val = int.from_bytes(frame[4:6], "little")
-                  if val > 0:
-                    reported_host_rx_count = val
-                    break
-                rcp_rx_count += 1
-        except OSError as exc:
-          _ = exc
+      if host_fd not in r:
+        if reported_host_rx_count > 0:
+          break
+        continue
+      try:
+        chunk = os.read(host_fd, 4096)
+        if not chunk:
+          continue
+        buf.extend(chunk)
+        while b"~" in buf:
+          part, buf = buf.split(b"~", 1)
+          if not part:
+            continue
+          frame = hdlc_decode_frame(part)
+          if not frame:
+            continue
+          if frame.startswith(b"\x80\x06\x00\x00") and len(frame) >= 6:
+            val = int.from_bytes(frame[4:6], "little")
+            if val > 0:
+              reported_host_rx_count = val
+              break
+          rcp_rx_count += 1
+      except OSError as exc:
+        _ = exc
       if reported_host_rx_count > 0:
         break
 

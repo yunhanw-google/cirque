@@ -120,15 +120,16 @@ class CirqueMcpServer:
     if env_exts:
       for ext_spec in re.split(r'[,;:]', env_exts):
         ext_spec = ext_spec.strip()
-        if ext_spec:
-          try:
-            self.register_extension(ext_spec)
-          except Exception as exc:  # pylint: disable=broad-exception-caught
-            logger.exception(
-                'Failed loading extension from CIRQUE_MCP_EXTENSIONS: %s: %s',
-                ext_spec,
-                exc,
-            )
+        if not ext_spec:
+          continue
+        try:
+          self.register_extension(ext_spec)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+          logger.exception(
+              'Failed loading extension from CIRQUE_MCP_EXTENSIONS: %s: %s',
+              ext_spec,
+              exc,
+          )
 
   @property
   def homes(self) -> Dict[str, CirqueHome]:

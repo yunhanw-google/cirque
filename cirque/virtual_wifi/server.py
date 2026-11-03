@@ -781,107 +781,112 @@ class VirtualWiFiServer:
         )
         return False, None
 
-      # Msg2: Pairwise, MIC, Replay Counter matches Msg1
-      if frame.is_pairwise and frame.has_mic and not frame.key_ack:
-        if auth_state.state == 'WAIT_MSG2':
-          if frame.replay_counter != auth_state.replay_counter:
-            logger.warning(
-                'Msg2 replay counter mismatch: %d != %d',
-                frame.replay_counter,
-                auth_state.replay_counter,
-            )
-            return False, None
+      # Msg2 and Msg4 must be: Pairwise, MIC, not Key Ack
+      if not (frame.is_pairwise and frame.has_mic and not frame.key_ack):
+        logger.warning(
+            'Unrecognized or out-of-order EAPOL frame from %s', station_id
+        )
+        return False, None
 
-          auth_state.snonce = frame.nonce
-          pmk = pbkdf2_sha1_pmk(target_ap.psk, target_ap.ssid)
-          ap_mac_b = bytes.fromhex(target_ap.bssid.replace(':', ''))
-          sta_mac_b = bytes.fromhex(station.mac_addr.replace(':', ''))
-          ptk = derive_ptk(
-              pmk,
-              aa_mac=ap_mac_b,
-              spa_mac=sta_mac_b,
-              anonce=auth_state.anonce,
-              snonce=auth_state.snonce,
+      if auth_state.state == 'WAIT_MSG2':
+        if frame.replay_counter != auth_state.replay_counter:
+          logger.warning(
+              'Msg2 replay counter mismatch: %d != %d',
+              frame.replay_counter,
+              auth_state.replay_counter,
           )
+          return False, None
 
-          msg2_zeroed = frame.encode_with_zeroed_mic()
-          if not verify_mic(ptk.kck, msg2_zeroed, frame.mic):
-            logger.warning(
-                'Msg2 MIC check failed for %s (wrong PSK/PMK)', station_id
-            )
-            station.state = 'disconnected'
-            self._auth_states.pop(station_id, None)
-            return False, None
+        auth_state.snonce = frame.nonce
+        pmk = pbkdf2_sha1_pmk(target_ap.psk, target_ap.ssid)
+        ap_mac_b = bytes.fromhex(target_ap.bssid.replace(':', ''))
+        sta_mac_b = bytes.fromhex(station.mac_addr.replace(':', ''))
+        ptk = derive_ptk(
+            pmk,
+            aa_mac=ap_mac_b,
+            spa_mac=sta_mac_b,
+            anonce=auth_state.anonce,
+            snonce=auth_state.snonce,
+        )
 
-          auth_state.ptk = ptk
-          auth_state.replay_counter += 1
-          auth_state.state = 'WAIT_MSG4'
-
-          # Construct Msg3 (Key Ack, Install, MIC, Secure, Encrypted Key Data)
-          gtk = self._get_or_create_ap_gtk(target_ap.ap_id)
-          gtk_kde = build_gtk_kde(gtk, key_id=1)
-          # RFC 3394 AES Key Wrap requires multiple of 8 bytes
-          wrapped_gtk_kde = aes_key_wrap(ptk.kek, gtk_kde)
-
-          key_info_msg3 = (
-              KEY_INFO_KEY_TYPE_PAIRWISE
-              | KEY_INFO_INSTALL
-              | KEY_INFO_KEY_ACK
-              | KEY_INFO_KEY_MIC
-              | KEY_INFO_SECURE
-              | KEY_INFO_ENCRYPTED_KEY_DATA
-              | KEY_DESC_VERSION_HMAC_SHA1_AES
+        msg2_zeroed = frame.encode_with_zeroed_mic()
+        if not verify_mic(ptk.kck, msg2_zeroed, frame.mic):
+          logger.warning(
+              'Msg2 MIC check failed for %s (wrong PSK/PMK)', station_id
           )
-          msg3 = EapolKeyFrame(
-              version=EAPOL_VERSION_1,
-              descriptor_type=2,
-              key_info=key_info_msg3,
-              key_length=16,
-              replay_counter=auth_state.replay_counter,
-              nonce=auth_state.anonce,
-              iv=b'\x00' * 16,
-              rsc=0,
-              mic=b'\x00' * 16,
-              key_data=wrapped_gtk_kde,
+          station.state = 'disconnected'
+          self._auth_states.pop(station_id, None)
+          return False, None
+
+        auth_state.ptk = ptk
+        auth_state.replay_counter += 1
+        auth_state.state = 'WAIT_MSG4'
+
+        # Construct Msg3 (Key Ack, Install, MIC, Secure, Encrypted Key Data)
+        gtk = self._get_or_create_ap_gtk(target_ap.ap_id)
+        gtk_kde = build_gtk_kde(gtk, key_id=1)
+        # RFC 3394 AES Key Wrap requires multiple of 8 bytes
+        wrapped_gtk_kde = aes_key_wrap(ptk.kek, gtk_kde)
+
+        key_info_msg3 = (
+            KEY_INFO_KEY_TYPE_PAIRWISE
+            | KEY_INFO_INSTALL
+            | KEY_INFO_KEY_ACK
+            | KEY_INFO_KEY_MIC
+            | KEY_INFO_SECURE
+            | KEY_INFO_ENCRYPTED_KEY_DATA
+            | KEY_DESC_VERSION_HMAC_SHA1_AES
+        )
+        msg3 = EapolKeyFrame(
+            version=EAPOL_VERSION_1,
+            descriptor_type=2,
+            key_info=key_info_msg3,
+            key_length=16,
+            replay_counter=auth_state.replay_counter,
+            nonce=auth_state.anonce,
+            iv=b'\x00' * 16,
+            rsc=0,
+            mic=b'\x00' * 16,
+            key_data=wrapped_gtk_kde,
+        )
+        msg3_zeroed = msg3.encode_with_zeroed_mic()
+        msg3.mic = compute_mic(ptk.kck, msg3_zeroed)
+        msg3_bytes = msg3.encode()
+
+        if send_data_client:
+          self._send_eapol_frame_to_station(
+              station_id, target_ap.bssid, station.mac_addr, msg3_bytes
           )
-          msg3_zeroed = msg3.encode_with_zeroed_mic()
-          msg3.mic = compute_mic(ptk.kck, msg3_zeroed)
-          msg3_bytes = msg3.encode()
+        return True, msg3_bytes
 
-          if send_data_client:
-            self._send_eapol_frame_to_station(
-                station_id, target_ap.bssid, station.mac_addr, msg3_bytes
-            )
-          return True, msg3_bytes
-
-        elif auth_state.state == 'WAIT_MSG4':
-          # Msg4: Pairwise, MIC, Secure, Replay Counter matches Msg3
-          if frame.replay_counter != auth_state.replay_counter:
-            logger.warning(
-                'Msg4 replay counter mismatch: %d != %d',
-                frame.replay_counter,
-                auth_state.replay_counter,
-            )
-            return False, None
-
-          if auth_state.ptk is None:
-            return False, None
-
-          msg4_zeroed = frame.encode_with_zeroed_mic()
-          if not verify_mic(auth_state.ptk.kck, msg4_zeroed, frame.mic):
-            logger.warning('Msg4 MIC verification failed for %s', station_id)
-            station.state = 'disconnected'
-            self._auth_states.pop(station_id, None)
-            return False, None
-
-          station.state = 'completed'
-          auth_state.state = 'COMPLETED'
-          logger.info(
-              'Station %s completed genuine WPA2 4-way handshake with AP %s',
-              station_id,
-              target_ap.ap_id,
+      elif auth_state.state == 'WAIT_MSG4':
+        # Msg4: Pairwise, MIC, Secure, Replay Counter matches Msg3
+        if frame.replay_counter != auth_state.replay_counter:
+          logger.warning(
+              'Msg4 replay counter mismatch: %d != %d',
+              frame.replay_counter,
+              auth_state.replay_counter,
           )
-          return True, None
+          return False, None
+
+        if auth_state.ptk is None:
+          return False, None
+
+        msg4_zeroed = frame.encode_with_zeroed_mic()
+        if not verify_mic(auth_state.ptk.kck, msg4_zeroed, frame.mic):
+          logger.warning('Msg4 MIC verification failed for %s', station_id)
+          station.state = 'disconnected'
+          self._auth_states.pop(station_id, None)
+          return False, None
+
+        station.state = 'completed'
+        auth_state.state = 'COMPLETED'
+        logger.info(
+            'Station %s completed genuine WPA2 4-way handshake with AP %s',
+            station_id,
+            target_ap.ap_id,
+        )
+        return True, None
 
       logger.warning(
           'Unrecognized or out-of-order EAPOL frame from %s', station_id

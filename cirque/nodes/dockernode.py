@@ -116,14 +116,14 @@ class DockerNode:
         self.labels.update(json.loads(env_labels))
       except Exception:
         for item in env_labels.split(','):
-          if '=' in item:
-            k, v = item.split('=', 1)
-            self.labels[k.strip()] = v.strip()
+          parts = item.split('=', 1)
+          if len(parts) == 2:
+            self.labels[parts[0].strip()] = parts[1].strip()
     if labels:
       self.labels.update(labels)
     self.logger = CirqueLog.get_cirque_logger(self.__class__.__name__)
     self.logger.info(
-        'Capabilites: {}'.format([c.name for c in self.capabilities])
+        'Capabilites: %s', [c.name for c in self.capabilities]
     )
 
   @classmethod
@@ -182,7 +182,7 @@ class DockerNode:
         if key not in arg0:
           arg0[key] = item
           continue
-        self.logger.debug('{}: {} {}'.format(key, arg0[key], item))
+        self.logger.debug('%s: %s %s', key, arg0[key], item)
         if isinstance(item, list):
           arg0[key] += item
         elif isinstance(item, dict):
@@ -205,15 +205,12 @@ class DockerNode:
         self.image_name, detach=True, **kwargs
     )
     self.logger.info(
-        'starting container with image {} args={}'.format(
-            self.image_name, kwargs
-        )
+        'starting container with image %s args=%s', self.image_name, kwargs
     )
     if self.container is None:
       self.logger.error(
-          'failed to create container: {}, please check and try again..'.format(
-              self.name
-          )
+          'failed to create container: %s, please check and try again..',
+          self.name,
       )
     self._install_ephemeral_udp_reuseport_guard()
     for capability in self.capabilities:

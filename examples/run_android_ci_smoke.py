@@ -155,6 +155,42 @@ def guest_wlan0_ipv4(android_node) -> str:
   return match.group(1) if match else ''
 
 
+def _ping_with_retries(
+    android_node, dev_ip: str, topo, home, device_node, args
+) -> str:
+  adb_text(
+      android_node,
+      f'ip neigh flush dev wlan0 2>/dev/null; ping -c 1 -W 1 {dev_ip} '
+      '2>/dev/null || true',
+  )
+  ping_out = ''
+  for attempt in range(4):
+    ping_out = adb_text(android_node, f'ping -I wlan0 -c 3 -W 2 {dev_ip}')
+    if PING_ZERO_LOSS_RE.search(ping_out):
+      return ping_out
+    ping_out = adb_text(android_node, f'ping -c 3 -W 2 {dev_ip}')
+    if PING_ZERO_LOSS_RE.search(ping_out):
+      return ping_out
+    if attempt < 3:
+      time.sleep(1.0)
+
+  for retry in range(3):
+    logging.info(
+        'Ping had packet loss; re-associating Wi-Fi (retry %d/3)...',
+        retry + 1,
+    )
+    topo._associate_wpa_and_dhcp(home, device_node.id, args.ssid, args.psk)
+    android_node.setup_guest_wifi('wlan0', timeout_sec=20.0)
+    ping_out = adb_text(android_node, f'ping -I wlan0 -c 3 -W 2 {dev_ip}')
+    if PING_ZERO_LOSS_RE.search(ping_out):
+      return ping_out
+    ping_out = adb_text(android_node, f'ping -c 3 -W 2 {dev_ip}')
+    if PING_ZERO_LOSS_RE.search(ping_out):
+      return ping_out
+    time.sleep(1.0)
+  return ping_out
+
+
 def summarize_pcaps(pcap_dir: str) -> Dict[str, Dict[str, object]]:
   from cirque.pcap.summarize_pcap import summarize_pcap
 
@@ -350,37 +386,9 @@ def run_smoke(args) -> int:
 
     ping_out = ''
     if oracles['guest_wlan0_lease_10_0_1'] and dev_ip:
-      adb_text(
-          android_node,
-          f'ip neigh flush dev wlan0 2>/dev/null; ping -c 1 -W 1 {dev_ip} '
-          '2>/dev/null || true',
+      ping_out = _ping_with_retries(
+          android_node, dev_ip, topo, home, device_node, args
       )
-      for attempt in range(4):
-        ping_out = adb_text(android_node, f'ping -I wlan0 -c 3 -W 2 {dev_ip}')
-        if PING_ZERO_LOSS_RE.search(ping_out):
-          break
-        ping_out = adb_text(android_node, f'ping -c 3 -W 2 {dev_ip}')
-        if PING_ZERO_LOSS_RE.search(ping_out):
-          break
-        if attempt < 3:
-          time.sleep(1.0)
-      if not PING_ZERO_LOSS_RE.search(ping_out):
-        for retry in range(3):
-          logging.info(
-              'Ping had packet loss; re-associating Wi-Fi (retry %d/3)...',
-              retry + 1,
-          )
-          topo._associate_wpa_and_dhcp(
-              home, device_node.id, args.ssid, args.psk
-          )
-          android_node.setup_guest_wifi('wlan0', timeout_sec=20.0)
-          ping_out = adb_text(android_node, f'ping -I wlan0 -c 3 -W 2 {dev_ip}')
-          if PING_ZERO_LOSS_RE.search(ping_out):
-            break
-          ping_out = adb_text(android_node, f'ping -c 3 -W 2 {dev_ip}')
-          if PING_ZERO_LOSS_RE.search(ping_out):
-            break
-          time.sleep(1.0)
     details['ping_output'] = ping_out.strip()
     oracles['guest_to_device_ping_zero_loss'] = bool(
         PING_ZERO_LOSS_RE.search(ping_out))

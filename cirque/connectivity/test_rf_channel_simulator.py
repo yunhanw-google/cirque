@@ -490,17 +490,17 @@ class RfChannelSimulatorTest(unittest.TestCase):
             'sed', x_m=15.0, y_m=0.0, z_m=1.0, tx_power_thread_dbm=0.0, walls=1
         )
       drops = 0
+      trials = (
+          (('tbr', 'sed'), 64),
+          (('sed', 'tbr'), 120),
+          (('tbr', 'sed'), 48),
+      )
       for _ in range(n_trials):
-        for direction, flen in (
-            (('tbr', 'sed'), 64),
-            (('sed', 'tbr'), 120),
-            (('tbr', 'sed'), 48),
-        ):
+        for direction, flen in trials:
           sample = self.sim.evaluate_packet(
               'thread', direction[0], direction[1], frame_len_bytes=flen
           )
-          if sample.dropped:
-            drops += 1
+          drops += int(sample.dropped)
       return drops
 
     ideal_drops = run_trial('ideal', seed=2026)

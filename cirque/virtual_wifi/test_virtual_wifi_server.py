@@ -2043,10 +2043,11 @@ class TestVirtualWiFiControllerSystem(unittest.TestCase):
 
         state_signals = []
         for name, params in signals_emitted:
-          if name == 'PropertiesChanged':
-            props = params[1] if len(params) > 1 else params[0]
-            if isinstance(props, dict) and 'State' in props:
-              state_signals.append(props['State'])
+          if name != 'PropertiesChanged':
+            continue
+          props = params[1] if len(params) > 1 else params[0]
+          if isinstance(props, dict) and 'State' in props:
+            state_signals.append(props['State'])
         self.assertIn('4way_handshake', state_signals)
         self.assertIn('completed', state_signals)
       finally:

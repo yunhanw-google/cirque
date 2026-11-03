@@ -843,24 +843,24 @@ class TestGattDiscoveryAndAttDatabase(unittest.TestCase):
 
       tree = ast.parse(content, filename=fpath)
       for node in ast.walk(tree):
-        if isinstance(node, ast.ExceptHandler):
-          is_broad_exc = False
-          if node.type is None:
-            is_broad_exc = True
-          elif isinstance(node.type, ast.Name) and node.type.id == 'Exception':
-            is_broad_exc = True
-          if is_broad_exc:
-            if len(node.body) == 1 and isinstance(node.body[0], ast.Pass):
-              bare_pass_errors.append(
-                  f'{fname}:{node.lineno} has unlogged except Exception: pass'
-              )
-            elif any(isinstance(s, ast.Pass) for s in node.body) and not any(
-                isinstance(s, ast.Expr) and isinstance(s.value, ast.Call)
-                for s in node.body
-            ):
-              bare_pass_errors.append(
-                  f'{fname}:{node.lineno} has unlogged pass in except Exception'
-              )
+        if not isinstance(node, ast.ExceptHandler):
+          continue
+        is_broad_exc = node.type is None or (
+            isinstance(node.type, ast.Name) and node.type.id == 'Exception'
+        )
+        if not is_broad_exc:
+          continue
+        if len(node.body) == 1 and isinstance(node.body[0], ast.Pass):
+          bare_pass_errors.append(
+              f'{fname}:{node.lineno} has unlogged except Exception: pass'
+          )
+        elif any(isinstance(s, ast.Pass) for s in node.body) and not any(
+            isinstance(s, ast.Expr) and isinstance(s.value, ast.Call)
+            for s in node.body
+        ):
+          bare_pass_errors.append(
+              f'{fname}:{node.lineno} has unlogged pass in except Exception'
+          )
 
     self.assertEqual(
         handle_constant_errors,

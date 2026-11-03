@@ -372,13 +372,16 @@ class TestCirqueMcpServer(unittest.TestCase):
         'rf_orthogonal_channel_agility': 'regime_g_orthogonal_channel_agility',
         'rf_microwave_broadband_jammer': 'regime_h_microwave_broadband_jammer',
     }
+    def _verify_recipe(recipe):
+      res = self.server._tool_inject_rf_fault({'recipe': recipe})
+      self.assertIn('status', res)
+      if recipe in expected_regime:
+        self.assertEqual(rf_sim.config.regime_name, expected_regime[recipe])
+
     try:
       for recipe in advertised:
         with self.subTest(recipe=recipe):
-          res = self.server._tool_inject_rf_fault({'recipe': recipe})
-          self.assertIn('status', res)
-          if recipe in expected_regime:
-            self.assertEqual(rf_sim.config.regime_name, expected_regime[recipe])
+          _verify_recipe(recipe)
       self.assertEqual(
           set(expected_regime), {r for r in advertised if r.startswith('rf_')}
       )

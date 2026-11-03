@@ -29,7 +29,7 @@ import base64
 import time
 import gzip
 import os
-from typing import Any
+from typing import Any, List, Set
 try:
   import requests
 except ImportError:  # requests is optional
@@ -87,6 +87,28 @@ def _fetch_file_content(
       return b''
 
 
+def _extract_recording_names(data: Any) -> Set[str]:
+  """Extracts basename of .mp4 recording names from list or dict response."""
+  names: Set[str] = set()
+  items: List[Any] = []
+  if isinstance(data, list):
+    items = data
+  elif isinstance(data, dict):
+    recs = (
+        data.get('recordings', [])
+        or data.get('files', [])
+        or data.get('output', [])
+    )
+    if isinstance(recs, list):
+      items = recs
+  for item in items:
+    if isinstance(item, str) and item.endswith('.mp4'):
+      names.add(os.path.basename(item))
+    elif isinstance(item, dict) and 'name' in item:
+      names.add(os.path.basename(str(item['name'])))
+  return names
+
+
 def _save_android_screen_recordings(
     test_instance: Any, dev_id: str, prefix: str, log_dir: str
 ) -> None:
@@ -131,23 +153,7 @@ def _save_android_screen_recordings(
       )
       resp = requests.get(list_url, timeout=10)
       if resp.status_code == 200:
-        data = resp.json()
-        if isinstance(data, list):
-          for item in data:
-            if isinstance(item, str) and item.endswith('.mp4'):
-              discovered_names.add(os.path.basename(item))
-            elif isinstance(item, dict) and 'name' in item:
-              discovered_names.add(os.path.basename(item['name']))
-        elif isinstance(data, dict):
-          recs = (
-              data.get('recordings', [])
-              or data.get('files', [])
-              or data.get('output', [])
-          )
-          if isinstance(recs, list):
-            for item in recs:
-              if isinstance(item, str) and item.endswith('.mp4'):
-                discovered_names.add(os.path.basename(item))
+        discovered_names.update(_extract_recording_names(resp.json()))
     except Exception as list_err:  # pylint: disable=broad-except
       if hasattr(test_instance, 'logger') and test_instance.logger:
         test_instance.logger.debug(
@@ -290,6 +296,27 @@ def _save_android_coverage_files(
           for line in str(ls_out).splitlines()
           if line.strip().endswith('.profraw') or line.strip().endswith('.ec')
       ]
+      if not current_paths:
+        pull_ls_cmd = (
+            "sh -c 'rm -rf /tmp/profraw_tmp && mkdir -p /tmp/profraw_tmp && "
+            'adb pull /data/user/0/com.google.chip.chiptool/files/ '
+            '/tmp/profraw_tmp/ >/dev/null 2>&1; '
+            'find /tmp/profraw_tmp -type f -name "*.profraw" '
+            "2>/dev/null || true'"
+        )
+        fb_res = test_instance.execute_device_cmd(dev_id, pull_ls_cmd)
+        fb_out = (
+            fb_res.get('output', '') or fb_res.get('return_value', '')
+            if isinstance(fb_res, dict)
+            else str(fb_res)
+        )
+        if isinstance(fb_out, bytes):
+          fb_out = fb_out.decode('utf-8', errors='replace')
+        current_paths = [
+            line.strip()
+            for line in str(fb_out).splitlines()
+            if line.strip().endswith('.profraw') or line.strip().endswith('.ec')
+        ]
       discovered_paths = current_paths
       if any(p.endswith('.profraw') for p in current_paths):
         break
@@ -314,8 +341,26 @@ def _save_android_coverage_files(
         b64_str = b64_str.decode('utf-8', errors='replace')
       cleaned_b64 = ''.join(str(b64_str).split())
       if not cleaned_b64:
+        fb_b64_cmd = (
+            f"sh -c 'base64 -w 0 {remote_path} 2>/dev/null || "
+            f"base64 {remote_path} 2>/dev/null'"
+        )
+        fb_b64_res = test_instance.execute_device_cmd(dev_id, fb_b64_cmd)
+        fb_b64_str = (
+            fb_b64_res.get('output', '') or fb_b64_res.get('return_value', '')
+            if isinstance(fb_b64_res, dict)
+            else str(fb_b64_res)
+        )
+        if isinstance(fb_b64_str, bytes):
+          fb_b64_str = fb_b64_str.decode('utf-8', errors='replace')
+        cleaned_b64 = ''.join(str(fb_b64_str).split())
+      if not cleaned_b64:
         continue
-      content = gzip.decompress(base64.b64decode(cleaned_b64))
+      raw_payload = base64.b64decode(cleaned_b64)
+      try:
+        content = gzip.decompress(raw_payload)
+      except Exception:
+        content = raw_payload
       if content:
         prof_name = f"{short_id}-{os.path.basename(remote_path)}"
         dest_path = os.path.join(coverage_path, prof_name)

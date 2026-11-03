@@ -567,20 +567,25 @@ class VirtualBluetoothController:
     )
     self.emit_h4(build_command_complete_event(opcode, 0x01))
 
+  def _update_acl_att_stats(self, payload: bytes) -> None:
+    if len(payload) < 9:
+      return
+    _, cid = struct.unpack_from('<HH', payload, 4)
+    if cid != 0x0004:
+      return
+    opcode = payload[8]
+    if opcode in (0x12, 0x52):
+      self.state.att_write_packets += 1
+    elif opcode == 0x1D:
+      self.state.att_indication_packets += 1
+
   def _handle_hci_acl_data(self, payload: bytes) -> None:
     if len(payload) < 4:
       return
     handle = struct.unpack_from('<HH', payload, 0)[0] & 0x0FFF
     with self._lock:
       self.state.acl_tx_packets += 1
-      if len(payload) >= 8:
-        _, cid = struct.unpack_from('<HH', payload, 4)
-        if cid == 0x0004 and len(payload) >= 9:
-          opcode = payload[8]
-          if opcode in (0x12, 0x52):
-            self.state.att_write_packets += 1
-          elif opcode == 0x1D:
-            self.state.att_indication_packets += 1
+      self._update_acl_att_stats(payload)
       conn = self.state.connections.get(handle)
       peer_addr = str(conn['peer_bd_addr']) if conn else None
     self.emit_h4(build_number_of_completed_packets_event(handle, 1))

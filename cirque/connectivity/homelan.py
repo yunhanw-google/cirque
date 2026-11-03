@@ -31,16 +31,16 @@ class HomeLan:
     self.subnet = None
     self.gateway = None
     if 'ipvlan' in self.__name:
-      self.__create_ipvlan_network()
+      self._create_ipvlan_network()
     else:
-      self.__create_docker_network()
-      self.__inspect_network_properties()
+      self._create_docker_network()
+      self._inspect_network_properties()
       # bypass disable mutual access for ipv4
       # in ipv6 feature.
       if 'ipv6' not in self.__name:
-        self.__disable_container_mutual_access()
+        self._disable_container_mutual_access()
 
-  def __create_docker_network(self):
+  def _create_docker_network(self):
     # The docker-py library will add a weird route which disconnects
     # the host when creating networks. The `docker network inspect`isn't
     # supported neither so we use bash commands directly.
@@ -65,37 +65,40 @@ class HomeLan:
     if ret.returncode != 0:
       self.logger.error('Failed to create home lan %s', self.__name)
     if self.__ipv6:
-      self.__enable_ipv6_external_access(used_subnet)
+      self._enable_ipv6_external_access(used_subnet)
 
-  def __create_ipvlan_network(self):
+  def _create_ipvlan_network(self):
     interface_command = "route | awk '/default / {print $8}'"
     ret = host_run(self.logger, interface_command)
     if ret.returncode != 0:
-      self.logger.error('Failed to get network interface for creating '
-                        'ipvlan %s: %s' % (self.__name, ret.stderr))
+      self.logger.error(
+          'Failed to get network interface for creating ipvlan %s: %s',
+          self.__name, ret.stderr)
     interface = ret.stdout.rstrip().decode('utf-8')
     subnet_command = "ip addr show %s | awk '/inet / {print $2}'" % interface
     ret = host_run(self.logger, subnet_command)
     if ret.returncode != 0:
-      self.logger.error('Failed to get subnetwork for create '
-                        'ipvalen %s: %s' % (self.__name, ret.stderr))
+      self.logger.error(
+          'Failed to get subnetwork for create ipvalen %s: %s',
+          self.__name, ret.stderr)
     subnet = ret.stdout.rstrip().decode('utf-8')
     gateway_command = "ip r | awk '/default via/ {print $3}'"
     ret = host_run(self.logger, gateway_command)
     if ret.returncode != 0:
-      self.logger.error('Failed to retrieve gateway for create '
-                        'ipvalen %s: %s' % (self.__name, ret.stderr))
+      self.logger.error(
+          'Failed to retrieve gateway for create ipvalen %s: %s',
+          self.__name, ret.stderr)
     gateway = ret.stdout.rstrip().decode('utf-8')
     ipvlan_command = 'docker network create -d ipvlan --subnet=%s'\
         ' --gateway=%s -o parent=%s %s' % (
             subnet, gateway, interface, self.__name)
     ret = host_run(self.logger, ipvlan_command)
     if ret.returncode != 0:
-      self.logger.error('Failed to create ipvlan %s: %s' %
-                        (self.__name, ret.stderr))
-    self.__inspect_network_properties()
+      self.logger.error(
+          'Failed to create ipvlan %s: %s', self.__name, ret.stderr)
+    self._inspect_network_properties()
 
-  def __disable_container_mutual_access(self):
+  def _disable_container_mutual_access(self):
     if not self.subnet:
       return
     manipulate_iptable_src_dst_rule(self.logger, self.subnet, self.subnet,
@@ -105,13 +108,13 @@ class HomeLan:
     manipulate_iptable_src_dst_rule(self.logger, self.subnet, self.gateway,
                                     'ACCEPT')
 
-  def __disable_ipv6_external_access(self):
+  def _disable_ipv6_external_access(self):
     flush_command = "ip6tables -t nat -F"
     ret = host_run(self.logger, flush_command)
     if ret.returncode != 0:
       self.logger.debug("Unable to flush nat rule from ipv6...")
 
-  def __enable_ipv6_external_access(self, subnet=None):
+  def _enable_ipv6_external_access(self, subnet=None):
     target_subnet = subnet or self.subnet or IPV6_SUBNET
     ip6tables_command = " ".join([
         "ip6tables -t nat -A POSTROUTING -s {}".format(target_subnet),
@@ -121,14 +124,14 @@ class HomeLan:
     if ret.returncode != 0:
       self.logger.debug("Fail to setup ipv6 external access in ip6tables")
 
-  def __inspect_network_properties(self):
+  def _inspect_network_properties(self):
     ret = host_run(self.logger, ['docker', 'network', 'inspect', self.__name])
     if ret.returncode != 0:
-      self.logger.error('Failed to inspect home lan %s' % self.__name)
+      self.logger.error('Failed to inspect home lan %s', self.__name)
       return
     network_info = json.loads(ret.stdout.decode())
     if not network_info:
-      self.logger.error('Failed to inspect home lan %s' % self.__name)
+      self.logger.error('Failed to inspect home lan %s', self.__name)
       return
     network_configs = network_info[0].get('IPAM', {}).get('Config', [])
     if not network_configs:
@@ -154,7 +157,7 @@ class HomeLan:
     if host_run(self.logger, cmd).returncode != 0:
       self.logger.error('Failed to remove home lan %s', self.__name)
     if self.__ipv6:
-      self.__disable_ipv6_external_access()
+      self._disable_ipv6_external_access()
     if all(nwk not in self.__name for nwk in ('ipv6', 'ipvlan')):
       manipulate_iptable_src_dst_rule(
           self.logger, self.subnet, self.subnet, 'DROP', add=False)
@@ -175,3 +178,10 @@ class HomeLan:
 
   def __del__(self):
     self.close()
+
+  _HomeLan__create_docker_network = _create_docker_network
+  _HomeLan__create_ipvlan_network = _create_ipvlan_network
+  _HomeLan__disable_container_mutual_access = _disable_container_mutual_access
+  _HomeLan__disable_ipv6_external_access = _disable_ipv6_external_access
+  _HomeLan__enable_ipv6_external_access = _enable_ipv6_external_access
+  _HomeLan__inspect_network_properties = _inspect_network_properties

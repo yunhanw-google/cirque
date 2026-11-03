@@ -405,9 +405,12 @@ class VirtualBluezAdapterBridge:
       elif uuid_matches(char_uuid_raw, profile.indicate_char_uuid):
         ind_decl_h, ind_val_h = decl_h, val_h
       else:
-        for opt_uuid in profile.optional_char_uuids:
-          if uuid_matches(char_uuid_raw, opt_uuid):
-            optional_handles[opt_uuid] = val_h
+        matched_opts = [
+            u for u in profile.optional_char_uuids
+            if uuid_matches(char_uuid_raw, u)
+        ]
+        for opt_uuid in matched_opts:
+          optional_handles[opt_uuid] = val_h
 
     if write_val_h is None or ind_val_h is None or ind_decl_h is None:
       raise RuntimeError(

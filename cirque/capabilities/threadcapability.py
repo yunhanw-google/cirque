@@ -39,7 +39,7 @@ class ThreadCapability(BaseCapability):
     for daemon in self.daemons:
       if daemon not in {'wpantund', 'otbr-agent'}:
         self.logger.warning(
-            'using unkown thread daemon mode: {}'.format(daemon)
+            'using unkown thread daemon mode: %s', daemon
         )
 
   @property

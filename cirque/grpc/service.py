@@ -252,22 +252,33 @@ def convert_mount_capability_to_pb(capability_description):
 cirque_service = None
 
 
-def __exit_handler():
+def _exit_handler():
   global cirque_service
   for home in cirque_service.homes.values():
     home.destroy_home()
   TaskRunner.stop()
 
 
+__exit_handler = _exit_handler
+
+
 class CirqueService(service_pb2_grpc.CirqueServiceServicer):
 
   def __init__(self):
     self.homes = dict()
-    self.__next_home_id = 0
+    self._next_home_id = 0
+
+  @property
+  def _CirqueService__next_home_id(self):
+    return self._next_home_id
+
+  @_CirqueService__next_home_id.setter
+  def _CirqueService__next_home_id(self, val):
+    self._next_home_id = val
 
   def CreateCirqueHome(self, _, context):
-    home = CirqueHome(str(self.__next_home_id))
-    self.__next_home_id += 1
+    home = CirqueHome(str(self._next_home_id))
+    self._next_home_id += 1
     self.homes[home.home_id] = home
     return service_pb2.CreateCirqueHomeResponse(home_id=home.home_id)
 
@@ -441,7 +452,7 @@ class CirqueService(service_pb2_grpc.CirqueServiceServicer):
 def serve(service_port=50051):
   global cirque_service
   cirque_service = CirqueService()
-  atexit.register(__exit_handler)
+  atexit.register(_exit_handler)
   server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
   service_pb2_grpc.add_CirqueServiceServicer_to_server(cirque_service, server)
   logger.info('running grpc service on port: {}'.format(service_port))
@@ -468,5 +479,5 @@ if __name__ == '__main__':
     try:
       s.bind(('', service_port))
     except (OSError, PermissionError) as err:
-      raise RuntimeError('{}:{!r}'.format(service_port, err))
+      raise RuntimeError('{}:{!r}'.format(service_port, err)) from err
   main(service_port)

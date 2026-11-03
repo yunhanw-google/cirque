@@ -468,6 +468,18 @@ def _parse_dhcp_options(udp_payload: bytes) -> Optional[_DhcpSummary]:
   return _DhcpSummary(xid=xid, yiaddr=yiaddr, msg_type=msg_type)
 
 
+def _apply_dhcp_info(
+    details: Dict[str, Any], encap: List[str], dhcp_info: _DhcpSummary
+) -> Tuple[str, str]:
+  title = f'DHCP {dhcp_info.msg_type}'
+  summary = f'{title} xid=0x{dhcp_info.xid:08x} yiaddr={dhcp_info.yiaddr}'
+  encap.append(f'DHCP ({dhcp_info.msg_type})')
+  details['dhcp_message_type'] = dhcp_info.msg_type
+  details['dhcp_xid'] = f'0x{dhcp_info.xid:08x}'
+  details['dhcp_yiaddr'] = dhcp_info.yiaddr
+  return title, summary
+
+
 def dissect_wifi_packet(
     ts: float, raw_data: bytes, pcap_name: str, index: int
 ) -> Optional[FlowEvent]:
@@ -548,14 +560,7 @@ def dissect_wifi_packet(
           )
           dhcp_info = _parse_dhcp_options(l3_payload[28:])
           if dhcp_info is not None:
-            title = f'DHCP {dhcp_info.msg_type}'
-            summary = (
-                f'{title} xid=0x{dhcp_info.xid:08x} yiaddr={dhcp_info.yiaddr}'
-            )
-            encap.append(f'DHCP ({dhcp_info.msg_type})')
-            details['dhcp_message_type'] = dhcp_info.msg_type
-            details['dhcp_xid'] = f'0x{dhcp_info.xid:08x}'
-            details['dhcp_yiaddr'] = dhcp_info.yiaddr
+            title, summary = _apply_dhcp_info(details, encap, dhcp_info)
   elif ethertype == 0x86DD:  # IPv6
     sublayer = 'IPv6'
     encap.append('IPv6')

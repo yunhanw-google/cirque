@@ -219,16 +219,17 @@ if any(s in st for s in ("child", "router", "leader")):
   log_files = ["/var/log/syslog"] + glob.glob("/tmp/*.log")
   if not instance_name:
     for log_file in log_files:
-      if os.path.exists(log_file):
-        try:
-          with open(log_file, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-            m = pattern.search(content)
-            if m:
-              instance_name = m.group(1).upper()
-              break
-        except (IOError, OSError) as e:
-          sys.stderr.write(f"Warning: could not read {log_file}: {e}\n")
+      if not os.path.exists(log_file):
+        continue
+      try:
+        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+          content = f.read()
+          m = pattern.search(content)
+          if m:
+            instance_name = m.group(1).upper()
+            break
+      except (IOError, OSError) as e:
+        sys.stderr.write(f"Warning: could not read {log_file}: {e}\n")
 
   if not instance_name:
     sys.stderr.write("Could not find instance name in logs.\n")
