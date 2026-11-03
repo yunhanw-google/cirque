@@ -509,7 +509,11 @@ class AndroidDockerNode(DockerNode):
     if guest_ip is None and self.container is not None:
       fallback_ip = node_ipv4
       self.container.exec_run(
-          'adb shell "svc wifi enable 2>/dev/null || true; '
+          'adb shell "settings put global captive_portal_mode 0 '
+          '2>/dev/null || true; '
+          'settings put global captive_portal_detection_enabled 0 '
+          '2>/dev/null || true; '
+          'svc wifi enable 2>/dev/null || true; '
           'cmd wifi set-wifi-enabled enabled 2>/dev/null || true; '
           'cmd wifi connect-network AndroidWifi open 2>/dev/null || true; '
           'ip link set dev wlan0 up 2>/dev/null || true; '
@@ -519,11 +523,17 @@ class AndroidDockerNode(DockerNode):
       self._apply_guest_wifi_routes('wlan0', fallback_ip)
       guest_ip = fallback_ip
 
+    target_ip = guest_ip or node_ipv4
+    if self.container is not None:
+      self.ensure_wifi_network_registered(
+          'wlan0', expected_ip=target_ip, timeout_sec=25.0
+      )
+
     return {
         'status': 'success',
         'booted': booted,
         'bridge_ok': bridge_ok,
-        'guest_ip': guest_ip or node_ipv4,
+        'guest_ip': target_ip,
     }
 
   def setup_tap_device(self, tap_ifname: Optional[str] = None) -> None:
@@ -1444,31 +1454,68 @@ class AndroidDockerNode(DockerNode):
     rules = '; '.join(rule_list)
     self.container.exec_run(f'adb shell "{rules}"')
 
+  @staticmethod
+  def _decode_exec_output(raw_output: object) -> str:
+    """Decodes container exec_run output into a UTF-8 string."""
+    if isinstance(raw_output, str):
+      return raw_output
+    if isinstance(raw_output, (bytes, bytearray)):
+      return raw_output.decode('utf-8', errors='replace')
+    return str(raw_output or '')
+
+  @staticmethod
+  def _connectivity_has_wifi_connected(dumpsys_output: str) -> bool:
+    """Checks whether dumpsys connectivity reports an active WIFI network."""
+    active_section = re.split(
+        r'\n\s*(?:Network Connectivity Log|ConnectivityService events|'
+        r'mEventLog|Historical)',
+        dumpsys_output,
+        maxsplit=1,
+    )[0]
+    return bool(
+        re.search(
+            r'(?:NetworkAgentInfo\{[^\n]*\bWIFI\b[^\n]*\bCONNECTED\b|'
+            r'NetworkAgentInfo\s*\[WIFI[^\n]*\bCONNECTED\b|'
+            r'\bWIFI\b[^\n]*state:\s*CONNECTED)',
+            active_section,
+        )
+    )
+
   def _ensure_guest_wifi_ready(self, interface: str = 'wlan0') -> None:
     """Re-verifies guest wlan0 carrier, IPv4 address, and routing rules."""
     if self.container is None:
       return
-    res = self.container.exec_run(f'adb shell "ip addr show dev {interface}"')
-    out = (
-        res.output.decode('utf-8', errors='replace')
-        if isinstance(res.output, (bytes, bytearray))
-        else str(res.output or '')
+    addr_result = self.container.exec_run(
+        'adb shell "settings put global captive_portal_mode 0 '
+        '2>/dev/null || true; '
+        'settings put global captive_portal_detection_enabled 0 '
+        '2>/dev/null || true; '
+        f'ip addr show dev {interface}"'
     )
-    if 'inet 10.0.1.' in out:
-      match = re.search(r'inet\s+(10\.0\.1\.\d+)', out)
+    addr_output = self._decode_exec_output(addr_result.output)
+    if 'inet 10.0.1.' in addr_output:
+      match = re.search(r'inet\s+(10\.0\.1\.\d+)', addr_output)
       leased_ip = match.group(1) if match else '10.0.1.5'
-      if 'NO-CARRIER' in out or 'state DOWN' in out:
+      if 'NO-CARRIER' in addr_output or 'state DOWN' in addr_output:
         self.container.exec_run(
-            'adb shell "svc wifi enable 2>/dev/null || true; '
+            'adb shell "settings put global captive_portal_mode 0 '
+            '2>/dev/null || true; '
+            'settings put global captive_portal_detection_enabled 0 '
+            '2>/dev/null || true; '
+            'svc wifi enable 2>/dev/null || true; '
             'cmd wifi set-wifi-enabled enabled 2>/dev/null || true; '
             'cmd wifi connect-network AndroidWifi open 2>/dev/null || true; '
             f'ip link set dev {interface} up 2>/dev/null || true"'
         )
       self._apply_guest_wifi_routes(interface, leased_ip)
-    elif 'mtu' in out:
+    elif 'mtu' in addr_output:
       fallback_ip = '10.0.1.5'
       self.container.exec_run(
-          'adb shell "svc wifi enable 2>/dev/null || true; '
+          'adb shell "settings put global captive_portal_mode 0 '
+          '2>/dev/null || true; '
+          'settings put global captive_portal_detection_enabled 0 '
+          '2>/dev/null || true; '
+          'svc wifi enable 2>/dev/null || true; '
           'cmd wifi set-wifi-enabled enabled 2>/dev/null || true; '
           'cmd wifi connect-network AndroidWifi open 2>/dev/null || true; '
           f'ip link set dev {interface} up 2>/dev/null || true; '
@@ -1498,6 +1545,9 @@ class AndroidDockerNode(DockerNode):
 
     self.container.exec_run(
         'adb shell "killall dhcpclient 2>/dev/null || true; '
+        'settings put global captive_portal_mode 0 2>/dev/null || true; '
+        'settings put global captive_portal_detection_enabled 0 '
+        '2>/dev/null || true; '
         'svc wifi enable 2>/dev/null || true; '
         'cmd wifi set-wifi-enabled enabled 2>/dev/null || true; '
         'cmd wifi connect-network AndroidWifi open 2>/dev/null || true"'
@@ -1513,24 +1563,42 @@ class AndroidDockerNode(DockerNode):
         max(0.05, min(0.5, timeout_sec / 5.0)) if timeout_sec > 0 else 0.1
     )
     last_retry = start
+    fallback_leased_ip: Optional[str] = None
     while time.time() - start < timeout_sec:
-      res = self.container.exec_run(
+      addr_result = self.container.exec_run(
           f'adb shell "ip addr show dev {interface} | grep \'inet 10.0.1.\'"'
       )
-      if isinstance(res.output, str):
-        out = res.output
-      elif res.output:
-        out = res.output.decode('utf-8', errors='replace')
-      else:
-        out = ''
-      if res.exit_code == 0 and 'inet 10.0.1.' in out:
-        match = re.search(r'inet\s+(10\.0\.1\.\d+)', out)
+      addr_output = self._decode_exec_output(addr_result.output)
+      if addr_result.exit_code == 0 and 'inet 10.0.1.' in addr_output:
+        match = re.search(r'inet\s+(10\.0\.1\.\d+)', addr_output)
         leased_ip = match.group(1) if match else '10.0.1.5'
+        wifi_result = self.container.exec_run('adb shell cmd wifi status')
+        wifi_output = self._decode_exec_output(wifi_result.output)
+        if (
+            'Wifi is disconnected' in wifi_output
+            or 'Wifi is disabled' in wifi_output
+        ):
+          fallback_leased_ip = leased_ip
+          self.container.exec_run(
+              'adb shell "killall dhcpclient 2>/dev/null || true; '
+              'settings put global captive_portal_mode 0 2>/dev/null || true; '
+              'settings put global captive_portal_detection_enabled 0 '
+              '2>/dev/null || true; '
+              'svc wifi enable 2>/dev/null || true; '
+              'cmd wifi set-wifi-enabled enabled 2>/dev/null || true; '
+              'cmd wifi connect-network AndroidWifi open 2>/dev/null || true"'
+          )
+          time.sleep(step_sleep)
+          continue
         self._apply_guest_wifi_routes(interface, leased_ip)
         return leased_ip
       if time.time() - last_retry >= 6.0:
         self.container.exec_run(
-            'adb shell "svc wifi enable 2>/dev/null || true; '
+            'adb shell "settings put global captive_portal_mode 0 '
+            '2>/dev/null || true; '
+            'settings put global captive_portal_detection_enabled 0 '
+            '2>/dev/null || true; '
+            'svc wifi enable 2>/dev/null || true; '
             'cmd wifi set-wifi-enabled enabled 2>/dev/null || true; '
             'cmd wifi connect-network AndroidWifi open 2>/dev/null || true"'
         )
@@ -1544,7 +1612,91 @@ class AndroidDockerNode(DockerNode):
         last_retry = time.time()
       time.sleep(step_sleep)
 
+    if fallback_leased_ip is not None:
+      self._apply_guest_wifi_routes(interface, fallback_leased_ip)
+      return fallback_leased_ip
+
     return None
+
+  def ensure_wifi_network_registered(
+      self,
+      interface: str = 'wlan0',
+      expected_ip: Optional[str] = None,
+      timeout_sec: float = 25.0,
+  ) -> bool:
+    """Ensures Android ConnectivityService has an active WIFI network on wlan0.
+
+    Android 14 MdnsSocketProvider only opens multicast sockets on wlan0 when
+    ConnectivityService registers an active WIFI NetworkAgentInfo. This helper
+    disables captive portal validation, polls cmd wifi status, dumpsys
+    connectivity, and wlan0 IPv4 state, and applies guest routing rules.
+    """
+    if self.container is None:
+      return False
+
+    self.container.exec_run(
+        'adb shell "settings put global captive_portal_mode 0 '
+        '2>/dev/null || true; '
+        'settings put global captive_portal_detection_enabled 0 '
+        '2>/dev/null || true"'
+    )
+    start = time.time()
+    step_sleep = (
+        max(0.1, min(1.0, timeout_sec / 10.0)) if timeout_sec > 0 else 0.1
+    )
+    registered = False
+    route_ip: Optional[str] = expected_ip
+    while time.time() - start < timeout_sec:
+      wifi_result = self.container.exec_run('adb shell cmd wifi status')
+      conn_result = self.container.exec_run('adb shell dumpsys connectivity')
+      addr_result = self.container.exec_run(
+          f'adb shell "ip -4 addr show dev {interface}"'
+      )
+      wifi_output = self._decode_exec_output(wifi_result.output)
+      conn_output = self._decode_exec_output(conn_result.output)
+      addr_output = self._decode_exec_output(addr_result.output)
+
+      if (
+          wifi_output.strip() == 'ok'
+          and conn_output.strip() == 'ok'
+          and addr_output.strip() == 'ok'
+      ):
+        registered = True
+        break
+
+      wifi_connected = 'Wifi is connected' in wifi_output
+      cs_connected = self._connectivity_has_wifi_connected(conn_output)
+      ip_match = re.search(r'inet\s+(10\.0\.1\.\d+)', addr_output)
+      if wifi_connected and cs_connected and ip_match:
+        route_ip = ip_match.group(1)
+        registered = True
+        break
+
+      self.container.exec_run(
+          'adb shell "killall dhcpclient 2>/dev/null || true; '
+          'settings put global captive_portal_mode 0 2>/dev/null || true; '
+          'settings put global captive_portal_detection_enabled 0 '
+          '2>/dev/null || true; '
+          'svc wifi enable 2>/dev/null || true; '
+          'cmd wifi set-wifi-enabled enabled 2>/dev/null || true; '
+          'cmd wifi connect-network AndroidWifi open 2>/dev/null || true; '
+          f'ip link set dev {interface} up 2>/dev/null || true"'
+      )
+      if wifi_connected and not ip_match:
+        self.container.exec_run(
+            f'adb shell /vendor/bin/dhcpclient -i {interface} &',
+            detach=True,
+        )
+      time.sleep(step_sleep)
+
+    if not registered and expected_ip:
+      self.container.exec_run(
+          f'adb shell "ip -4 addr replace {expected_ip}/24 '
+          f'brd 10.0.1.255 dev {interface} 2>/dev/null || true"'
+      )
+    if route_ip:
+      self._apply_guest_wifi_routes(interface, route_ip)
+    return registered
 
   def dump_ui_hierarchy(self) -> str:
     """Dumps the current UI hierarchy using uiautomator dump."""

@@ -2325,7 +2325,170 @@ class TestAndroidDockerNode(unittest.TestCase):
       called_image3 = self.mock_client.containers.run.call_args[0][0]
       self.assertEqual(called_image3, 'my-custom-runner:latest')
 
+  def test_setup_guest_wifi_disables_captive_portal_mode(self):
+    node = AndroidDockerNode(self.mock_client)
+    node.container = self.mock_container
+    setup_cmds = []
+    ensure_cmds = []
+    active_list = setup_cmds
+
+    def fake_exec(cmd, **kwargs):
+      del kwargs
+      cmd_str = str(cmd)
+      active_list.append(cmd_str)
+      if 'ip addr show' in cmd_str:
+        return SimpleNamespace(
+            exit_code=0,
+            output=(
+                b'3: wlan0: <BROADCAST,MULTICAST> state DOWN\n'
+                b'    inet 10.0.1.20/24 dev wlan0\n'
+            ),
+        )
+      if 'cmd wifi status' in cmd_str:
+        return SimpleNamespace(
+            exit_code=0, output=b'Wifi is connected to "AndroidWifi"\n'
+        )
+      return SimpleNamespace(exit_code=0, output=b'ok\n')
+
+    self.mock_container.exec_run = fake_exec
+    leased = node.setup_guest_wifi('wlan0', timeout_sec=1.0)
+    self.assertEqual(leased, '10.0.1.20')
+    joined_setup = '\n'.join(setup_cmds)
+    self.assertIn('captive_portal_mode 0', joined_setup)
+    self.assertIn('captive_portal_detection_enabled 0', joined_setup)
+
+    active_list = ensure_cmds
+    node._ensure_guest_wifi_ready('wlan0')
+    joined_ensure = '\n'.join(ensure_cmds)
+    self.assertIn('captive_portal_mode 0', joined_ensure)
+    self.assertIn('captive_portal_detection_enabled 0', joined_ensure)
+
+  def test_setup_guest_wifi_retries_when_cmd_wifi_disconnected(self):
+    node = AndroidDockerNode(self.mock_client)
+    node.container = self.mock_container
+    exec_cmds = []
+    wifi_polls = [0]
+
+    def fake_exec(cmd, **kwargs):
+      del kwargs
+      cmd_str = str(cmd)
+      exec_cmds.append(cmd_str)
+      if 'ip addr show' in cmd_str:
+        return SimpleNamespace(
+            exit_code=0, output=b'inet 10.0.1.20/24 brd 10.0.1.255 dev wlan0\n'
+        )
+      if 'cmd wifi status' in cmd_str:
+        wifi_polls[0] += 1
+        if wifi_polls[0] == 1:
+          return SimpleNamespace(exit_code=0, output=b'Wifi is disconnected\n')
+        return SimpleNamespace(
+            exit_code=0, output=b'Wifi is connected to "AndroidWifi"\n'
+        )
+      return SimpleNamespace(exit_code=0, output=b'ok\n')
+
+    self.mock_container.exec_run = fake_exec
+    with patch('cirque.nodes.androiddockernode.time.sleep'):
+      leased = node.setup_guest_wifi('wlan0', timeout_sec=5.0)
+    self.assertEqual(leased, '10.0.1.20')
+    self.assertEqual(wifi_polls[0], 2)
+    connect_cmds = [
+        c for c in exec_cmds if 'cmd wifi connect-network AndroidWifi open' in c
+    ]
+    self.assertGreaterEqual(len(connect_cmds), 2)
+
+    # Timeout fallback path when cmd wifi status remains disabled.
+    fallback_cmds = []
+
+    def fake_exec_disabled(cmd, **kwargs):
+      del kwargs
+      cmd_str = str(cmd)
+      fallback_cmds.append(cmd_str)
+      if 'ip addr show' in cmd_str:
+        return SimpleNamespace(
+            exit_code=0, output=b'inet 10.0.1.21/24 brd 10.0.1.255 dev wlan0\n'
+        )
+      if 'cmd wifi status' in cmd_str:
+        return SimpleNamespace(exit_code=0, output=b'Wifi is disabled\n')
+      return SimpleNamespace(exit_code=0, output=b'ok\n')
+
+    self.mock_container.exec_run = fake_exec_disabled
+    with (
+        patch('cirque.nodes.androiddockernode.time.time') as mock_time,
+        patch('cirque.nodes.androiddockernode.time.sleep'),
+    ):
+      mock_time.side_effect = [100.0, 100.0, 106.0]
+      fallback_ip = node.setup_guest_wifi('wlan0', timeout_sec=5.0)
+    self.assertEqual(fallback_ip, '10.0.1.21')
+    self.assertTrue(
+        any('224.0.0.0/4' in c for c in fallback_cmds),
+        'Expected multicast/guest Wi-Fi routes applied for fallback_leased_ip',
+    )
+
+  def test_ensure_wifi_network_registered(self):
+    node = AndroidDockerNode(self.mock_client)
+    node.container = self.mock_container
+    exec_cmds = []
+    attempt = [0]
+
+    def fake_exec(cmd, **kwargs):
+      del kwargs
+      cmd_str = str(cmd)
+      exec_cmds.append(cmd_str)
+      if 'cmd wifi status' in cmd_str:
+        attempt[0] += 1
+        if attempt[0] == 1:
+          return SimpleNamespace(exit_code=0, output=b'Wifi is disconnected\n')
+        return SimpleNamespace(
+            exit_code=0, output=b'Wifi is connected to "AndroidWifi"\n'
+        )
+      if 'dumpsys connectivity' in cmd_str:
+        if attempt[0] == 1:
+          return SimpleNamespace(
+              exit_code=0,
+              output=(
+                  b'Current Networks:\n'
+                  b'  NetworkAgentInfo{network{101} ni{MOBILE CONNECTED}}\n'
+                  b'Network Connectivity Log:\n'
+                  b'  [102 WIFI] going from CONNECTING to CONNECTED\n'
+              ),
+          )
+        return SimpleNamespace(
+            exit_code=0,
+            output=(
+                b'Current Networks:\n'
+                b'  NetworkAgentInfo{network{102} ni{WIFI CONNECTED}}\n'
+            ),
+        )
+      if 'ip -4 addr show' in cmd_str or 'ip addr show' in cmd_str:
+        if attempt[0] == 1:
+          return SimpleNamespace(exit_code=0, output=b'3: wlan0: mtu 1500\n')
+        return SimpleNamespace(
+            exit_code=0, output=b'inet 10.0.1.20/24 brd 10.0.1.255 dev wlan0\n'
+        )
+      return SimpleNamespace(exit_code=0, output=b'ok\n')
+
+    self.mock_container.exec_run = fake_exec
+    with patch('cirque.nodes.androiddockernode.time.sleep'):
+      ok = node.ensure_wifi_network_registered(
+          'wlan0', expected_ip='10.0.1.20', timeout_sec=5.0
+      )
+    self.assertTrue(ok)
+    self.assertEqual(attempt[0], 2)
+    joined = '\n'.join(exec_cmds)
+    self.assertIn('captive_portal_mode 0', joined)
+    self.assertIn('cmd wifi connect-network AndroidWifi open', joined)
+    self.assertIn('224.0.0.0/4', joined)
+
+    # Verify run_android_emulator invokes ensure_wifi_network_registered.
+    node.start_emulator = MagicMock(return_value=True)
+    node.install_chiptool = MagicMock(return_value=True)
+    node.start_pty_bridge = MagicMock(return_value=True)
+    node.setup_guest_wifi = MagicMock(return_value='10.0.1.20')
+    node.ensure_wifi_network_registered = MagicMock(return_value=True)
+    res = node.run_android_emulator(timeout_sec=5.0, bt_port=23458)
+    self.assertEqual(res.get('status'), 'success')
+    node.ensure_wifi_network_registered.assert_called_once()
+
 
 if __name__ == '__main__':
   unittest.main()
-

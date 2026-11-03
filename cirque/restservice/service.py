@@ -638,4 +638,6 @@ if service_mode:
 TaskRunner.start()
 
 if __name__ == '__main__':
-  app.run()
+  cirque_host = os.environ.get('CIRQUE_HOST', '127.0.0.1')
+  cirque_port = int(os.environ.get('CIRQUE_PORT', '5000'))
+  app.run(host=cirque_host, port=cirque_port)

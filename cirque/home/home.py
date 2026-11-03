@@ -427,8 +427,9 @@ class CirqueHome:
     for lan in ('external_lan', 'internal_lan', 'ipv6_lan', 'ipvlan_lan'):
       if getattr(self, lan):
         getattr(self, lan).close()
-    self.docker_client.containers.prune()
-    self.docker_client.networks.prune()
+    if os.environ.get('CIRQUE_SKIP_GLOBAL_PRUNE') != '1':
+      self.docker_client.containers.prune()
+      self.docker_client.networks.prune()
     self.home = None
     return self.home_id
 
