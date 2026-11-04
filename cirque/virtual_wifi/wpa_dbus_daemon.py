@@ -34,8 +34,14 @@ from typing import Dict, List, Optional
 
 from cirque.common.docker_transport import wait_for_socket_file
 from cirque.virtual_wifi.docker_wifi_bridge import DockerVirtualWiFiManager
-from gi.repository import Gio
-from gi.repository import GLib
+try:
+    from gi.repository import Gio
+except ImportError:
+    Gio = None
+try:
+    from gi.repository import GLib
+except ImportError:
+    GLib = None
 
 
 @dataclass

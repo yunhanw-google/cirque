@@ -181,6 +181,27 @@ def rf_channel_reset_endpoint():
   rf_sim.reset_metrics()
   return jsonify(rf_sim.get_status())
 
+@app.route('/rf_channel/fault', methods=['POST'])
+def rf_channel_fault_endpoint():
+  from cirque.connectivity.rf_channel_simulator import RfChannelSimulator, RfFaultRule
+  import time
+  rf_sim = RfChannelSimulator.get_shared()
+  payload = request.get_json(force=True, silent=True) or {}
+  if not payload or not payload.get('rule'):
+      rf_sim.config.fault_rule = None
+      return jsonify({'status': 'ok', 'fault_rule': None})
+  
+  rf_sim.config.fault_rule = RfFaultRule(
+      rule=payload.get('rule', ''),
+      src_ext=payload.get('src_ext', ''),
+      src_short=payload.get('src_short', ''),
+      window_s=float(payload.get('window_s', 5.0)),
+      psdu_threshold=int(payload.get('psdu_threshold', 100)),
+      armed_time=time.time(),
+      trigger_time=0.0
+  )
+  rf_sim.config.enabled = True
+  return jsonify({'status': 'ok', 'fault_rule': payload})
 
 @app.route(
     '/init_android_emulator/<home_id>/<device_id>', methods=['GET', 'POST']
@@ -621,7 +642,6 @@ def mcp_visualize():
     return jsonify({'error': str(exc)}), 500
 
 
-@app.route('/')
 def destroy_homes():
   global homes
   logger.info('removing all the homes..')

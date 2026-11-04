@@ -22,7 +22,7 @@ import subprocess
 import termios
 import time
 from threading import Event, Lock, Thread
-from typing import Callable, Optional, Set
+from typing import Callable, Optional, Set, Tuple
 
 from cirque.capabilities.pcapcapability import (
     OT_SIM_DEFAULT_PORT_BASE,
@@ -151,7 +151,36 @@ def _configure_raw_tty(fd: int) -> None:
   except (OSError, termios.error):
     pass
 
-
+def _parse_802154_data_addrs(psdu: bytes) -> Tuple[Optional[str], Optional[str]]:
+  if len(psdu) < 3:
+    return None, None
+  fcf0, fcf1 = psdu[0], psdu[1]
+  if (fcf0 & 0x07) != 1:  # Not Data
+    return None, None
+  pan_id_comp = (fcf0 >> 6) & 0x01
+  dest_mode = (fcf1 >> 2) & 0x03
+  src_mode = (fcf1 >> 6) & 0x03
+  offset = 3
+  dest_addr = None
+  if dest_mode > 0:
+    offset += 2  # Dest PAN
+    if dest_mode == 2 and len(psdu) >= offset + 2:
+      dest_addr = psdu[offset : offset + 2]
+      offset += 2
+    elif dest_mode == 3 and len(psdu) >= offset + 8:
+      dest_addr = psdu[offset : offset + 8]
+      offset += 8
+  src_addr = None
+  if src_mode > 0:
+    if pan_id_comp == 0 and len(psdu) >= offset + 2:
+      offset += 2  # Src PAN
+    if src_mode == 2 and len(psdu) >= offset + 2:
+      src_addr = psdu[offset : offset + 2]
+    elif src_mode == 3 and len(psdu) >= offset + 8:
+      src_addr = psdu[offset : offset + 8]
+  def fmt(b):
+    return b[::-1].hex().lower() if b else None
+  return fmt(src_addr), fmt(dest_addr)
 class SpinelHdlcRfProxy:
   """Pure-Cirque Spinel HDLC proxy between Host (otbr-agent) and RCP (ot-rcp).
 
@@ -236,7 +265,8 @@ class SpinelHdlcRfProxy:
           self._last_rcp_mac_seq,
       )
     sim = self._get_sim()
-    if not sim.config.enabled:
+    has_fault = bool(getattr(sim.config, 'fault_rule', None) and sim.config.fault_rule.rule)
+    if not sim.config.enabled and not has_fault:
       return body
     if (
         len(body) >= 5
@@ -248,6 +278,26 @@ class SpinelHdlcRfProxy:
       if 3 <= psdu_len <= 127 and len(body) >= meta_offset + 6:
         fcf_lo = body[5]
         frame_type = fcf_lo & 0x07
+        
+        fault_rule = getattr(sim.config, 'fault_rule', None)
+        if frame_type == 1:
+            psdu_extract = body[5:5+psdu_len]
+            src, dst = _parse_802154_data_addrs(psdu_extract)
+            self._logger.info('node %s: Host->RCP DATA (len=%d, src=%s, dst=%s)', self.node_id, psdu_len, src, dst)
+        if fault_rule and fault_rule.rule == 'sigma2_blackhole':
+          if frame_type == 1:
+            psdu_extract = body[5:5+psdu_len]
+            _, dst = _parse_802154_data_addrs(psdu_extract)
+            allowed_dsts = {
+                s.lower().replace('0x', '')
+                for s in (fault_rule.src_ext, getattr(fault_rule, 'src_short', ''))
+                if s
+            }
+            if dst and (dst.lower().replace('0x', '') in allowed_dsts):
+              self._logger.info('node %s: Host->RCP burst detected to dst=%s, arming trigger_time', self.node_id, dst)
+              if fault_rule.trigger_time == 0.0:
+                fault_rule.trigger_time = time.time()
+            
         security_enabled = (fcf_lo & 0x08) != 0
         ack_requested = (fcf_lo & 0x20) != 0
         channel = body[meta_offset]
@@ -378,7 +428,8 @@ class SpinelHdlcRfProxy:
             ))
 
     sim = self._get_sim()
-    if not sim.config.enabled:
+    has_fault = bool(getattr(sim.config, 'fault_rule', None) and sim.config.fault_rule.rule)
+    if not sim.config.enabled and not has_fault:
       return body
 
     # Case 1: Inbound RX frame (SPINEL_PROP_STREAM_RAW = 0x71)
@@ -387,6 +438,30 @@ class SpinelHdlcRfProxy:
         and body[1] == _SPINEL_CMD_PROP_VALUE_IS
         and body[2] == _SPINEL_PROP_STREAM_RAW
     ):
+      psdu_len = body[3] | (body[4] << 8)
+      if 3 <= psdu_len <= 127 and len(body) >= 5 + psdu_len:
+        psdu = body[5:5+psdu_len]
+        frame_type = psdu[0] & 0x07
+        fault_rule = getattr(sim.config, 'fault_rule', None)
+        if frame_type == 1:
+            src, dst = _parse_802154_data_addrs(psdu)
+            self._logger.info('node %s: RCP->Host DATA (len=%d, src=%s, dst=%s)', self.node_id, psdu_len, src, dst)
+        if fault_rule and fault_rule.rule == 'sigma2_blackhole':
+          if time.time() - fault_rule.trigger_time < fault_rule.window_s:
+            allowed_srcs = {
+                s.lower().replace('0x', '')
+                for s in (fault_rule.src_ext, getattr(fault_rule, 'src_short', ''))
+                if s
+            }
+            if frame_type == 1:
+              src_clean = (src or '').lower().replace('0x', '')
+              src_match = (not allowed_srcs) or (src_clean in allowed_srcs)
+              self._logger.info('node %s: CHECKING Sigma2 frame (len=%d, src=%s, src_match=%s, thresh=%s)', self.node_id, psdu_len, src, src_match, fault_rule.psdu_threshold)
+              if src_clean and src_match and psdu_len >= fault_rule.psdu_threshold:
+                fault_rule.dropped_count += 1
+                self._logger.info('node %s: BLACKHOLED Sigma2 frame (len=%d, src=%s)', self.node_id, psdu_len, src)
+                return None
+
       mutable = bytearray(body)
       if self._rewrite_packed_radio_frame(mutable, pack_offset=3):
         return bytes(mutable)

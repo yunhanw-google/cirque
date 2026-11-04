@@ -241,6 +241,17 @@ class RfInterfererState:
 
 
 @dataclass
+class RfFaultRule:
+  rule: str = ''
+  src_ext: str = ''
+  src_short: str = ''
+  window_s: float = 0.0
+  psdu_threshold: int = 100
+  armed_time: float = 0.0
+  trigger_time: float = 0.0
+  dropped_count: int = 0
+
+@dataclass
 class RfChannelConfig:
   """Global 2.4 GHz stochastic propagation and fading configuration."""
 
@@ -265,6 +276,7 @@ class RfChannelConfig:
   wifi_channel: int = 6
   thread_channel: int = 15
   seed: Optional[int] = None
+  fault_rule: Optional[RfFaultRule] = None
 
 
 @dataclass
@@ -566,6 +578,7 @@ class RfChannelSimulator:
         self.config.fading_mode = 'none'
         self.config.rician_k_db = 15.0
         self.config.noise_floor_dbm = -95.0
+        self.config.max_per_cap = 0.0
         self._interferers.clear()
       elif p in ('regime_a', 'regime_a_near_los', 'near_los', 'los'):
         self.config.enabled = True
@@ -1382,6 +1395,7 @@ class RfChannelSimulator:
           ]
       return {
           'config': asdict(self.config),
+          'fault_rule': asdict(self.config.fault_rule) if getattr(self.config, 'fault_rule', None) else None,
           'available_presets': [
               'ideal',
               'regime_a_near_los',

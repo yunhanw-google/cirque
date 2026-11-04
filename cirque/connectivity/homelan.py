@@ -41,32 +41,43 @@ class HomeLan:
         self._disable_container_mutual_access()
 
   def _create_docker_network(self):
-    # The docker-py library will add a weird route which disconnects
-    # the host when creating networks. The `docker network inspect`isn't
-    # supported neither so we use bash commands directly.
-    cmd = ['docker', 'network', 'create', self.__name]
-    used_subnet = IPV6_SUBNET
-    if self.__internal:
-      cmd.append('--internal')
-    elif self.__ipv6:
-      cmd.append('--subnet="{}"'.format(IPV6_SUBNET))
-      cmd.append('--gateway="{}"'.format(IPV6_GATEWAY))
-      cmd.append('--ipv6')
-    ret = host_run(self.logger, cmd)
-    if ret.returncode != 0 and self.__ipv6:
-      subnet_id = abs(hash(self.__name)) & 0xFFFF
-      used_subnet = f'fd00:c17c:{subnet_id:04x}::/64'
-      alt_gw = f'fd00:c17c:{subnet_id:04x}::1'
-      cmd = [
-          'docker', 'network', 'create', self.__name,
-          f'--subnet="{used_subnet}"', f'--gateway="{alt_gw}"', '--ipv6',
-      ]
-      ret = host_run(self.logger, cmd)
-    if ret.returncode != 0:
-      self.logger.error('Failed to create home lan %s', self.__name)
-    if self.__ipv6:
-      self._enable_ipv6_external_access(used_subnet)
 
+    import random
+    max_retries = 10
+    used_subnet = IPV6_SUBNET
+    for attempt in range(max_retries):
+        cmd = ['docker', 'network', 'create', self.__name]
+        
+        if self.__internal:
+            cmd.append('--internal')
+        else:
+            # ALWAYS provide a random IPv4 subnet to prevent pool exhaustion
+            v4_subnet = f"10.{random.randint(100, 250)}.{random.randint(0, 250)}.0/24"
+            cmd.append(f'--subnet={v4_subnet}')
+            
+            if self.__ipv6:
+                # Use standard IPv6 on attempt 0, random on retries
+                if attempt == 0:
+                    used_subnet = IPV6_SUBNET
+                    alt_gw = IPV6_GATEWAY
+                else:
+                    subnet_id = random.randint(1, 0xFFFF)
+                    used_subnet = f'fd00:c17c:{subnet_id:04x}::/64'
+                    alt_gw = f'fd00:c17c:{subnet_id:04x}::1'
+                cmd.append(f'--subnet={used_subnet}')
+                cmd.append(f'--gateway={alt_gw}')
+                cmd.append('--ipv6')
+                
+        ret = host_run(self.logger, cmd)
+        if ret.returncode == 0:
+            break
+        self.logger.warning('docker network create failed on attempt %d: %s', attempt, ret.stderr)
+    
+    if ret.returncode != 0:
+        self.logger.error('Failed to create home lan %s: %s', self.__name, ret.stderr)
+        
+    if self.__ipv6:
+        self._enable_ipv6_external_access(used_subnet)
   def _create_ipvlan_network(self):
     interface_command = "route | awk '/default / {print $8}'"
     ret = host_run(self.logger, interface_command)
@@ -126,6 +137,7 @@ class HomeLan:
 
   def _inspect_network_properties(self):
     ret = host_run(self.logger, ['docker', 'network', 'inspect', self.__name])
+    self.logger.error('NETWORK INSPECT RESULT: ret=%s, out=%s, err=%s', ret.returncode, ret.stdout, ret.stderr)
     if ret.returncode != 0:
       self.logger.error('Failed to inspect home lan %s', self.__name)
       return
