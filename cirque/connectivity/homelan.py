@@ -21,6 +21,13 @@ from cirque.common.utils import host_run, manipulate_iptable_src_dst_rule
 IPV6_SUBNET = "2001:470:9a1a::/48"
 IPV6_GATEWAY = "2001:470:9a1a::1"
 
+
+def _first_host(subnet):
+  """Returns the first host address of `subnet` (Docker's default gateway)."""
+  network = ipaddress.ip_network(subnet, strict=False)
+  return str(network.network_address + 1)
+
+
 class HomeLan:
 
   def __init__(self, name, internal=False, ipv6=False):
@@ -54,6 +61,9 @@ class HomeLan:
             # ALWAYS provide a random IPv4 subnet to prevent pool exhaustion
             v4_subnet = f"10.{random.randint(100, 250)}.{random.randint(0, 250)}.0/24"
             cmd.append(f'--subnet={v4_subnet}')
+            # Pin the gateway too: some Docker engines omit IPAM `Gateway`
+            # from `network inspect` when only `--subnet` is given.
+            cmd.append(f'--gateway={_first_host(v4_subnet)}')
             
             if self.__ipv6:
                 # Use standard IPv6 on attempt 0, random on retries
@@ -161,6 +171,8 @@ class HomeLan:
     if not self.subnet:
       self.subnet = network_configs[0].get('Subnet')
       self.gateway = network_configs[0].get('Gateway')
+    if self.subnet and not self.gateway:
+      self.gateway = _first_host(self.subnet)
 
   def close(self):
     if not self.subnet:

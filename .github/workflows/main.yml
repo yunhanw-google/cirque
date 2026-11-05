@@ -58,6 +58,7 @@ jobs:
           .venv/bin/python -m unittest -v cirque/virtual_bt/test_gatt_profile.py
           .venv/bin/python -m unittest -v cirque/pcap/test_oracles.py
           .venv/bin/python -m unittest -v cirque/nodes/test/test_android_diagnostics.py
+          .venv/bin/python -m unittest -v cirque/connectivity/test_homelan.py
           .venv/bin/python -m coverage run \
             --source=cirque/virtual_wifi,cirque/home,cirque/common,cirque/mcp \
             -m unittest -v \
